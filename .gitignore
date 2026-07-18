@@ -6,3 +6,4 @@ projects/**/data/transactions.txt
 projects/**/data/*.zip
 *.rds
 projects/cdss_hackathon_2020/data/google_mobility.csv
+AGENTS.md
