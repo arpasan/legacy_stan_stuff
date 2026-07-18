@@ -1,0 +1,709 @@
+---
+title: "Predicting Credit Card Fraud"
+author: "Andrej Arpáš"
+date: '2022-06-19'
+output:
+  html_document:
+    code_folding: show
+    fig_caption: yes
+    highlight: tango
+    theme: yeti
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+substitute: Capital One Data Science Challenge
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r 0a}
+rm(list = ls()) # clean glob. computing environment
+```
+
+```{r 0b}
+# gc() # garbage collect
+```
+
+We fetch the dataset from [here](https://github.com/CapitalOneRecruiting/DS).
+
+```{python a0}
+import pandas as pd
+from pathlib import Path
+
+data_path = Path("data/transactions_sample.jsonl")
+if not data_path.exists():
+    data_path = Path("data/transactions.txt")
+df = pd.read_json(data_path, lines=True)
+```
+
+```{python a1}
+df.head()
+```
+
+```{r 0c}
+library(reticulate)
+
+d <- reticulate::py$df # convert to r obj. for dplyr manipulation (faster), and 'gg' plotting (prettier)
+```
+
+Let's switch to R for piping.
+<br>
+
+
+# Q1: Load
+
+"Programmatically download and load the transactions data. Describe the structure. Provide some additional basic summary statistics for each field. Be sure to include a count of null, minimum, maximum, and unique values where appropriate."
+
+```{r 1a}
+d[1, 20] # `echoBuffer`, i.e. 20th col. in 1st row: ""
+```
+
+We have some rows and cols with `''` in lieu of NA. Let's fix that. Specifically, we can do away with `echoBuffer`, `merchantCity`, `merchantState`, `merchantZip`, `posOnPremises`, and `recurringAuthInd`. (Their missingness is 100%.)
+
+```{r 1b, fig.align='center', catche=TRUE, warning = FALSE, message = FALSE}
+# `, fig.align='center', catche=TRUE, echo=TRUE`
+library(naniar)
+library(dplyr)
+
+d %>%
+  mutate(across(.fns = ~replace(., . == '', NA))) %>%
+  visdat::vis_dat(warn_large_data = FALSE) +
+    ggplot2::scale_fill_manual(values = c('numeric' = '#FF9999', 'logical' = '#CCCCFF', 'missing' = 'gray53', 'character' = '#99CCFF')) + #CCFFFF #azure2
+    ggplot2::labs(title = 'Missingness: \nby Data Type')
+```
+
+Let us display that missingness also numerically.
+
+```{r 1c.0}
+d %>%
+  mutate(across(.fns = ~replace(., . == '', NA))) %>%
+  is.na() %>%
+  colSums() # missingness per col.
+```
+
+And let's calculate some basic descriptive statistics for our numeric variables.
+
+```{r 1c}
+# summary stats for numeric cols
+purrr::map_dfr(lst(min, median, mean, max, sd),
+               ~ summarize(d[, !(names(d) %in% c('accountNumber', 'customerId', 'cardCVV', 'enteredCVV', 'cardLast4Digits'))], across(where(is.numeric), .x, na.rm = TRUE)), # drop non-pertinent cols, e.g. `accountNumber`
+               .id = 'summary_stats')
+```
+
+Do note that there are some suspect values, e.g. `enteredCVV` being nill (`0`), or `0` for `cardLast4Digits`.
+
+```{r 1d}
+# drop cols with 100% missingness, and drop na
+e <- d %>%
+  mutate(across(.fns = ~replace(., . == '', NA))) %>%
+  select(-one_of(c('echoBuffer', 'merchantCity', 'merchantState',
+                   'merchantZip', 'posOnPremises', 'recurringAuthInd'))) %>%
+  tidyr::drop_na()
+```
+
+$`0` transactions seem to be "verification" transactions allegedly used by merchants to validate card / account details.
+<br>
+
+
+# Q2: Plot
+
+"Plot a histogram of the processed amounts of each transaction, the `transactionAmount` column. Report any structure you find and any hypotheses you have about that structure."
+
+```{r 2a, fig.align='center', catche=TRUE, echo=TRUE}
+library(ggplot2)
+
+myMode <- function(x) {
+  uniqX <- unique(x)
+  tabRes <- tabulate(match(x, uniqX))
+  uniqX[tabRes == max(tabRes)]
+}
+
+vlines <- data.frame(value = c(mean(e[e$transactionAmount != 0, 6]),
+                               max(myMode(e[e$transactionAmount != 0, 6])),
+                               median(e[e$transactionAmount != 0, 6])),
+                     stats = c('mean', 'mode', 'median'))
+
+e %>%
+  filter(transactionAmount != 0) %>%
+  ggplot(., aes(x=transactionAmount)) +
+    geom_histogram(aes(y=..density.., color = after_scale(ifelse(count == 0, 'transparent', 'lightcyan3'))), #006699
+                   fill='white', bins = 50, show.legend = F) +
+    geom_density(alpha=.1, fill='lightcyan3', color='lightcyan3', linetype=3) +
+    theme_classic() +
+    geom_vline(data=vlines,
+               aes(xintercept=value, color=stats), # linetype=stats
+               size=0.5, show.legend=T) + # color=c('#0066CC', '#FF6666', '#009999')
+    labs(title = 'Transaction Amount Dist.',
+         x = 'U.S. $',
+         y = 'Density') + # color = 'Stats'
+    scale_colour_manual(name = 'Stats',
+                        values =c('mean'='#0066CC', 'median'='#FF6666', 'mode'='#009999'), labels = c('mean','median', 'mode'))
+```
+
+After dropping ~22k zero-dollar transactions, which we may surmise to have been so-called "verification" transactions, we have mode (8.2) < median (92.2) < mean (141) -> Chi-squared dist. or Poisson dist. Or right-skewed (positive skewness) distribution. What stands out is that most transactions happen in the lower dollar-brackets (dropping off rather dramatically after ~\$500 threshold), and that by far the greatest chunk of the transactions happen under ~\$92.
+
+Another thing to think about is, it'd seem as though the transactions' dynamics are driven by what we might refer to as "frivolous" transactions, i.e. small-amount transactions. Since these are credit cards, that would seem to be a suboptimal behavior for the card-holder who, instead, should aim to use their credit cards for big-ticket items. This would appear to be a feature to exploit, though perhaps the fact we see some semblance of this behavior is an indication that it has already been exploited.
+<br>
+
+
+# Q3: Data Wrangling - Duplicate Transactions
+
+"Duplicated transactions: (i) **reversed transaction** (purchase followed by a reversal), and (ii) **multi-swipe transactions** (vendor accidentally charges a customer's card multiple times within a short time span)."
+
+```{r 3a}
+# reversed transactions (discounting verif. / $`0` transactions)
+e %>%
+  filter(transactionAmount != 0) %>%
+  mutate(dateTime = lubridate::ymd_hms(e[e$transactionAmount != 0, 5])) %>%
+  filter(transactionType == 'REVERSAL') %>%
+  select(accountNumber, transactionAmount, currentBalance, dateTime, merchantName, transactionType) %>%
+  group_by(accountNumber, transactionAmount) %>% # 19,488 records
+  as.data.frame() %>%
+  select(transactionAmount) %>%
+  sum() # $2,787,895
+```
+
+Discounting the zero-dollar verification transactions, we have 19,488 records worth $2,787,895 in reversed transactions.
+
+```{r 3b, warning = FALSE, message = FALSE, echo=TRUE}
+# multi-swipe transaction (discounting verif. / $`0` transactions)
+multiSwipeTransaction <- e %>% # 14,205 x 10
+  filter(transactionAmount != 0) %>%
+  mutate(dateTime = lubridate::ymd_hms(e[e$transactionAmount != 0, 5])) %>%
+  filter(transactionType != 'REVERSAL') %>% # filter out reversal transactions
+  select(accountNumber, transactionAmount, currentBalance, dateTime, merchantName) %>%
+  group_by(accountNumber, transactionAmount) %>% # transactionAmount, transactionDateTime
+  filter(n() > 1) %>%
+  mutate(date = as.Date(dateTime),
+         hour = lubridate::hour(dateTime),
+         minute = lubridate::minute(dateTime),
+         second = lubridate::second(dateTime)) %>%
+  mutate(hourMinuteSecond = paste(hour, minute, second, sep = ":")) %>%
+  group_by(accountNumber, transactionAmount, date) %>%
+  filter(n() > 1)
+```
+
+```{r 3c}
+firstTransactions <- multiSwipeTransaction %>%
+  group_by(accountNumber, transactionAmount) %>%
+  summarise() # %>% # 6,763 x 2
+  # as.data.frame() %>%
+  # select(transactionAmount) %>%
+  # sum() # $996,154.8
+
+dim(multiSwipeTransaction)[1] - dim(firstTransactions)[1] # 7442
+sum(multiSwipeTransaction$transactionAmount) - sum(firstTransactions$transactionAmount) # $1,097,507
+```
+
+Discounting the zero-dollar verification transactions, we have 7,442 records worth $1,097,507 in multi-swipe transactions.
+<br>
+
+
+# Q4: Model
+
+"Build a predictive model to determine whether a given transaction will be fraudulent (`isFraud`) or not."
+
+```{r 4a}
+# a bit more of that feature engineering stuff
+e$merchantName %>%
+  unique() %>%
+  length() # 2489 vendors
+```
+
+```{r 4a.2, echo=TRUE}
+fraudInTime <- e %>%
+  filter(transactionAmount != 0) %>%
+  mutate(dateTime = lubridate::ymd_hms(e[e$transactionAmount != 0, 5])) %>%
+  select(-one_of(c('transactionDateTime'))) %>%
+  mutate(date = as.Date(dateTime)) %>%
+  mutate(fraud = isFraud == TRUE,
+         noFraud = isFraud == FALSE) %>%
+  group_by(date) %>%
+  summarise_at(vars(fraud, noFraud),
+               list('n' = ~sum(. != 0),
+                    'prop' = ~(sum(. != 0) / n()))) %>%
+  rename(noFraud = noFraud_n,
+       fraud = fraud_n) %>%
+  tidyr::pivot_longer(cols = -date) %>%
+  mutate(count = ifelse(name == 'fraud' | name == 'noFraud', value, NA),
+         isFraud = ifelse(name == 'fraud' | name == 'noFraud', name, NA),
+         prop = ifelse(name == 'fraud_prop' | name == 'noFraud_prop', value, NA)) %>%
+  select(-one_of(c('value', 'name'))) %>%
+  mutate(prop = lead(prop),
+         prop = lead(prop)) %>%
+  tidyr::drop_na()
+```
+
+```{r 4b, fig.align='center', catche=TRUE, echo=TRUE}
+p1 <- fraudInTime %>%
+  slice(which(row_number() %% 2 == 1)) %>% # fraud
+  # slice(seq(2, n(), by = 2)) # noFraud
+  ggplot2::ggplot(aes(x = date, y = prop * 100)) +
+  geom_line(color = '#FF6666') +
+  # coord_cartesian(ylim = c(0.5, 2.5)) +
+  theme(panel.background = element_rect(fill = 'azure2'), panel.grid = element_line(color = 'white'),
+        plot.title = element_text(size=11)) +
+  labs(title = bquote(bold('Fraud') ~'As a Fraction of the Data'), x = 'Date', y = 'Percentage of the Data')
+
+p2 <- fraudInTime %>%
+  # slice(which(row_number() %% 2 == 1)) %>% # fraud
+  slice(seq(2, n(), by = 2)) %>% # noFraud
+  ggplot2::ggplot(aes(x = date, y = prop * 100)) +
+  geom_line(color = '#009999') +
+  # coord_cartesian(ylim = c(97, 99.5)) +
+  theme(panel.background = element_rect(fill = 'azure2'), panel.grid = element_line(color = 'white'),
+        plot.title = element_text(size=11)) +
+  labs(title = bquote(bold('No Fraud') ~'As a Fraction of the Data'), x = 'Date', y = 'Percentage of the Data')
+
+p3 <- fraudInTime %>%
+  slice(which(row_number() %% 2 == 1)) %>% # fraud
+  # slice(seq(2, n(), by = 2)) # noFraud
+  ggplot2::ggplot(aes(x = date, y = count)) +
+  geom_line(color = '#FF6666') +
+  theme(panel.background = element_rect(fill = 'azure2'), panel.grid = element_line(color = 'white'),
+        plot.title = element_text(size=11)) +
+  labs(title = bquote('Instances of' ~ bold('Fraud') ~'over the Year'), x = 'Date', y = 'Count')
+
+p4 <- fraudInTime %>%
+  # slice(which(row_number() %% 2 == 1)) %>% # fraud
+  slice(seq(2, n(), by = 2)) %>% # noFraud
+  ggplot2::ggplot(aes(x = date, y = count)) +
+  geom_line(color = '#009999') +
+  theme(panel.background = element_rect(fill = 'azure2'), panel.grid = element_line(color = 'white'),
+        plot.title = element_text(size=11)) +
+  labs(title = bquote('Instances of' ~ bold('No Fraud') ~'over the Year'), x = 'Date', y = 'Count')
+
+gridExtra::grid.arrange(p1, p2, p3, p4)
+```
+
+No particular pattern to observe as a time series, except that the count of no fraud increases over the year, which, however, may merely be on account of more transactions happening as time goes on. (We see no dramatic changes when looking at the data as a fraction of the total. We may cautiosly disregard time as a variable for the purposes of our modeling.)
+
+```{r 4c, fig.align='center', catche=TRUE}
+library(RColorBrewer)
+myCols = c(brewer.pal(name = 'Blues', n = 8)[3:8], brewer.pal(name = 'GnBu', n = 8)[2:8])
+
+e %>%
+  filter(transactionAmount != 0) %>%
+  mutate(dateTime = lubridate::ymd_hms(e[e$transactionAmount != 0, 5])) %>%
+  select(-one_of(c('transactionDateTime'))) %>%
+  mutate(date = as.Date(dateTime)) %>%
+  filter(transactionType == 'PURCHASE' & isFraud == 'TRUE') %>%
+  ggplot(., aes(x = transactionAmount,
+                fill = merchantCategoryCode)) +
+    geom_histogram() +
+    # facet_wrap(~merchantCategoryCode) +
+    facet_wrap(~merchantCategoryCode, # facet_grid()
+               labeller = as_labeller(c('rideshare' = 'Rideshare', 'entertainment' = 'Entertainment', 'mobileapps' = 'Mobile Apps', 'fastfood' = 'Fast Food', 'food_delivery' = 'Food Delivery',
+                                        'auto' = 'Auto', 'online_retail' = 'Online Retail', 'gym' = 'Gym', 'health' = 'Health', 'personal care' = 'Personal Care',
+                                        'food' = 'Food', 'fuel' = 'Fuel', 'online_subscriptions' = 'Online Subscriptions', 'online_gifts' = 'Online Gifts', 'hotels' = 'Hotels',
+                                        'airline' = 'Airline', 'furniture' = 'Furniture', 'subscriptions' = 'Subscriptions', 'cable/phone' = 'Cable / Phone'))) +
+    theme_minimal() +
+    theme(panel.background = element_rect(fill = 'azure2'), panel.grid = element_line(color = 'white')) +
+    scale_fill_manual('Legend',
+                      labels = c('Airline', 'Auto', 'Entertainment', 'Fast Food', 'Food', 'Furniture', 'Health', 'Hotels', 'Online Gifts',
+                                 'Online Retail', 'Personal Care', 'Rideshare', 'Subscriptions'),
+                      values = myCols) +
+    scale_color_manual(values = myCols) +
+    labs(title = bquote(bold('Fraud') ~'per Merchant Category Code'), x = 'Transaction Amount (U.S. $)', y = 'Count')
+```
+
+It seems plausible that certain merchant-type transactions are more prone to fraud, such as online retail. Including this info in the model might not be bad idea.
+
+Already did a `corrplot` and there's not a whole lot in there. Let's do some manipulations to come up with new variables that might help with the predictiveness. For instance, we shall surmise that frauds may tend to happen at a particular time in a day (perhaps later on), and that there are some merchants in that online retail business (or elsewhere) that are a good indicator of a fraud potentially occurring. Let's add two new column indicators like that to help with the modeling.
+
+```{r 4d}
+e %>%
+  filter(transactionAmount != 0) %>% # filter out verif. transactions
+  mutate(dateTime = lubridate::ymd_hms(e[e$transactionAmount != 0, 5])) %>%
+  select(-one_of(c('transactionDateTime'))) %>%
+  mutate(date = as.Date(dateTime)) %>%
+  mutate(isFraud = ifelse(isFraud == 'TRUE', 1, 0), # convert to numeric
+         expirationDateKeyInMatch = ifelse(expirationDateKeyInMatch == 'TRUE', 1, 0), # ditto
+         cardPresent = ifelse(cardPresent == 'TRUE', 1, 0)) %>% # ditto
+  filter(transactionType == 'PURCHASE') %>%
+  mutate(merchantCategoryCode = as.numeric(as.factor(merchantCategoryCode))) %>%
+  filter(isFraud == 1) %>%
+  group_by(merchantName, isFraud) %>%
+  count() %>%
+  arrange(desc(n)) %>%
+  print(n=22) # top 22 with count >= 100
+```
+
+The top fraudulent transactions "offenders". Displaying just the ones with more than `100` observations thereof.
+
+```{r 4e}
+topOffender = c('Lyft', 'ebay.com', 'Fresh Flowers', 'Uber', 'cheapfast.com',
+                'walmart.com', 'sears.com', 'oldnavy.com', 'staples.com', 'alibaba.com',
+                'amazon.com', 'gap.com', 'target.com', 'apple.com', 'discount.com',
+                'American Airlines', 'Fresh eCards', 'Blue Mountain Online Services', 'Next Day Online Services', 'Blue Mountain eCards',
+                'Fresh Online Services', 'Mobile eCards')
+```
+
+```{r 4f}
+f <- e %>%
+  filter(transactionAmount != 0) %>% # filter out verif. transactions
+  mutate(dateTime = lubridate::ymd_hms(e[e$transactionAmount != 0, 5])) %>%
+  select(-one_of(c('transactionDateTime'))) %>%
+  # mutate(date = as.Date(dateTime)) %>%
+  mutate(date = as.Date(dateTime),
+         hour = lubridate::hour(dateTime),
+         minute = lubridate::minute(dateTime),
+         second = lubridate::second(dateTime)) %>%
+  mutate(isFraud = ifelse(isFraud == 'TRUE', 1, 0), # convert to numeric
+         expirationDateKeyInMatch = ifelse(expirationDateKeyInMatch == 'TRUE', 1, 0), # ditto
+         cardPresent = ifelse(cardPresent == 'TRUE', 1, 0)) %>% # ditto
+  filter(transactionType == 'PURCHASE') %>%
+  mutate(merchantCategoryCode = as.numeric(as.factor(merchantCategoryCode))) %>% # convert to numeric
+  mutate(theWeeHoursTransactions = ifelse(hour >= 18 | hour <= 6, 1, 0)) %>% # col. for transactions happening in "the wee hours" 6pm-6am
+  mutate(topOffender = ifelse(merchantName %in% topOffender, 1, 0)) %>% # col. indicator if top "offender" merchant (fraud-wise)
+  mutate(wrongPin = ifelse(as.character(cardCVV) == as.character(enteredCVV), 0, 1)) %>% # indicator of whether the cvv entered matched the card's
+  select(-one_of(c('cardCVV', 'enteredCVV', 'hour', 'minute', 'second'))) %>%
+  # group_by(isFraud, wrongPin) %>%
+  # count()
+  select_if(., is.numeric)
+```
+
+Another new variable we may be curious to create, and explore, is checking whether at the time of a transaction, the CVV code entered matched the card's CVV. The assumption being that a fraudulent transaction may be one where the PIN isn't matched. Let's try that, and check.
+
+```{r 4g, fig.align='center', catche=TRUE}
+f %>%
+  cor() %>%
+  round(., 4) %>%
+  corrplot::corrplot(., method = 'number', tl.cex = 0.7, number.cex = 0.6)
+```
+
+Nothing to write home about. We barely see ~.01 correlations (between `isFraud`) and `transactionAmount` (positive), `cardPresent` (negative), and `topOffender` (positive).
+
+```{r 4g.2, fig.align='center', catche=TRUE, echo=TRUE}
+f %>%
+  group_by(isFraud, wrongPin) %>%
+  count() %>%
+  rename(count = n) %>%
+  filter(isFraud == 1) %>%
+  ggplot(., aes(x = as.factor(isFraud), y=count, fill=as.factor(wrongPin))) +
+    geom_bar(stat = 'identity', position = 'dodge') +
+    theme(panel.background = element_rect(fill = 'azure2'), panel.grid = element_line(color = 'white'),
+          axis.ticks.x=element_blank(), axis.text.x=element_blank()) +
+    scale_fill_manual(labels = c('Yes', 'No'), values = c('#009999', '#FF6666')) +
+    labs(title = bquote('Instances of' ~ bold('Fraud') ~'by PIN'), x = 'Fraud', y = 'Count',
+         fill = 'CVVs Matched')
+```
+
+Not the big kahuna I was hoping it to be, but that's alright.
+
+It's important that we create a balanced sample before proceeding. We don't want one value of the dependent variable to drown out the other in the sample. Let's do that.
+
+```{r 4h}
+f_0 <- f %>% # `noFraud` table
+  filter(isFraud == 0) %>% # 11,528 for T (1), 723,661 for F (0), i.e. ~0.0159 T:F ratio
+  sample_frac(., size = 0.016, replace = F)
+
+f_1 <- f %>% # `fraud` table
+  filter(isFraud == 1)
+
+g <- rbind(f_0, f_1) # balanced dataset for modeling
+```
+
+```{r 4i.0, include=FALSE, echo=TRUE}
+# g %>%
+#   filter(expirationDateKeyInMatch == 1) %>% # very unbalanced, too few obs. to balance out, so drop this
+#   select(expirationDateKeyInMatch) %>%
+#   as.vector() %>%
+#   t() %>%
+#   length()
+# 
+# g %>%
+#   group_by(merchantCategoryCode) %>%
+#   count()
+# 
+# g %>%
+#   group_by(isFraud) %>%
+#   count()
+```
+
+```{r 4i}
+g <- g %>%
+  select(-one_of(c('expirationDateKeyInMatch')))
+```
+<br>
+
+
+## Model 1: Plain Vanilla Logistic Regression
+
+Let's try our first model, which will be a regular machine learning (ML) one. We shall switch back to Python for this.
+
+```{r 4j}
+g_pd <- r_to_py(g)
+```
+
+```{python a2}
+r.g_pd
+```
+
+```{python a3}
+df2 = r.g_pd.copy()
+```
+
+We already balanced the sample, converted to numeric, and dropped `NA`s. There's not much left in the way of preprocessing, but let's scale and one hot encode.
+
+```{python a4, echo=TRUE}
+# test = df2.copy()
+```
+
+```{r 4k, echo=TRUE}
+# py_install('sklearn') # pip3 install sklearn
+```
+
+Some helper functions to massage the data to the right form for feeding into the model.
+
+```{python a5}
+import numpy as np
+
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+#  sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split, GridSearchCV
+```
+
+```{python a6}
+num_features = ['creditLimit', 'availableMoney', 'transactionAmount', 'cardLast4Digits', 'currentBalance']
+num_transformer = Pipeline(steps=[('scaler', StandardScaler())])
+
+cat_features = ['accountNumber', 'customerId', 'merchantCategoryCode', 'cardPresent', # 'isFraud',
+                'theWeeHoursTransactions', 'topOffender', 'wrongPin']
+cat_transformer = Pipeline(steps=[('onehot', OneHotEncoder(handle_unknown='ignore'))])
+
+preprocess = ColumnTransformer(transformers=[('num', num_transformer, num_features),
+                                             ('cat', cat_transformer, cat_features)])
+```
+
+```{python a7, echo=TRUE}
+# reticulate conversion seems to have made floats out of int64, let's change that back
+df2['accountNumber'] = df2['accountNumber'].apply(lambda x: int(x))
+df2['customerId'] = df2['customerId'].apply(lambda x: int(x))
+df2['creditLimit'] = df2['creditLimit'].apply(lambda x: int(x))
+df2['merchantCategoryCode'] = df2['merchantCategoryCode'].apply(lambda x: int(x))
+df2['cardLast4Digits'] = df2['cardLast4Digits'].apply(lambda x: int(x))
+df2['cardPresent'] = df2['cardPresent'].apply(lambda x: int(x))
+df2['isFraud'] = df2['isFraud'].apply(lambda x: int(x))
+df2['theWeeHoursTransactions'] = df2['theWeeHoursTransactions'].apply(lambda x: int(x))
+df2['topOffender'] = df2['topOffender'].apply(lambda x: int(x))
+df2['wrongPin'] = df2['wrongPin'].apply(lambda x: int(x))
+```
+
+```{python a8, echo=TRUE}
+# df2.groupby('wrongPin').count()
+```
+
+```{python a9, warning = FALSE, message = FALSE}
+X = df2.drop('isFraud', axis=1)
+y = df2['isFraud']
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state = 42) # reserve 20% for testing
+```
+
+```{python a10}
+preprocess = preprocess.fit(X_train)
+```
+
+```{python a11, echo=TRUE}
+def myPreprocessor(data):
+  preprocessed_data=preprocess.transform(data)
+  return preprocessed_data
+```
+
+```{python a12}
+myPreprocessor(X_train).shape
+```
+
+```{python a13}
+print(X_train.shape, X_test.shape, 
+      y_train.shape, y_test.shape)
+```
+
+```{python a14, warning = FALSE, message = FALSE}
+hyperparams = {'C':np.logspace(1, 10, 100), 'penalty':['l2'], 'max_iter':[100]} # 'max_iter':[5]
+
+logit = LogisticRegression()
+logitCv = GridSearchCV(logit, hyperparams, cv = 10)
+logitCv.fit(myPreprocessor(X_train), y_train)
+
+print('Best Parameters: ', logitCv.best_params_)
+```
+
+```{python a15, echo=TRUE}
+# list(logitCv.best_params_.values())[0]
+```
+
+```{python a16, warning = FALSE, message = FALSE, echo=TRUE}
+model = LogisticRegression(C = list(logitCv.best_params_.values())[0], penalty = 'l2')
+
+model.fit(myPreprocessor(X_train), y_train) # Fitting to the training set.
+
+model.score(myPreprocessor(X_train), y_train) # Fit score, 0-1 scale.
+```
+
+```{python a17}
+y_pred = model.predict(myPreprocessor(X_test))
+```
+
+```{python a18}
+y_pred
+```
+
+```{python a19}
+from sklearn.metrics import accuracy_score
+
+print("Accuracy: {:.2f}%".format(accuracy_score(y_test, y_pred)*100))
+```
+Better than tossing a coin, but we might do better still. Let's use Bayesian inference for the job. We'll switch back to R to call Stan that way. Let's do logits to cf. regular machine learning with Bayesian workflow, performance-wise.
+<br>
+
+
+## Model 2: Bayesian Logistic Regression
+
+```{r 5a}
+# a tiny bit of additional preprocessing like in python
+g <- g %>%
+  dplyr::mutate_at(vars(starts_with(colnames(g)[1:8])), ~c(scale(., center = T, scale = T)))
+```
+
+```{r 5b, echo=TRUE}
+# g$isFraud <- factor(g$isFraud)
+# 
+# X <- model.matrix(isFraud ~ ., data = g)
+# y <- g$isFraud
+```
+
+```{r 5c, warning = FALSE, message = FALSE}
+# some bayesian packages
+library(rstanarm)
+library(loo)
+library(projpred)
+library(bayesplot)
+```
+
+It's very important that we check again how balanced the sample is with respect to the dependent variable. Computing the model matrix inverse would fail from precompiled `stan_glm()` models, should the data not be balanced out.
+
+```{r 5d, echo=TRUE}
+thisFormula <- formula(paste("isFraud ~", paste(colnames(g)[1:(dim(g)[2]-1)][c(-10, -4, -5, -8, -1, -2, -7)], collapse = " + "))) # [-10] # must remove underrepresented vars lest r shouldn't be able to inverse the matrix (i.e. the code would fail)
+```
+
+The resultant formula is sparse but let's cautiously proceed.
+
+```{r 5e}
+formula(paste("isFraud ~", paste(colnames(g)[1:(dim(g)[2]-1)][c(-10, -4, -5, -8, -1, -2, -7)], collapse = " + ")))
+```
+
+```{r 5f, include=FALSE, echo=TRUE}
+g %>%
+  group_by(isFraud, topOffender) %>%
+  count()
+```
+
+```{r 5g}
+g$isFraud <- factor(g$isFraud)
+
+X <- model.matrix(thisFormula, data = g)
+y <- g$isFraud
+```
+
+```{r 5h}
+# can check the iversion
+# MASS::ginv(X) # take inverse of a matrix
+```
+
+```{r 5i}
+# model
+t_prior <- student_t(df = 7, location = 0, scale = 2.5) # student t prior with 7 degrees of freedom for coeffs ought to be close to 0
+post1 <- stan_glm(thisFormula, data = g, family = binomial(link = 'logit'), QR = TRUE, seed = 42, refresh = 0) # prior = t_prior, prior_intercept = t_prior,
+```
+
+```{r 5j, echo=TRUE}
+# dim(g)[2]
+```
+
+```{r 5k, fig.align='center', catche=TRUE, echo=TRUE}
+bayesplot::color_scheme_set('teal')
+pplot <- plot(post1, 'areas', prob = 0.95, prob_outer = 1)
+pplot +
+  geom_vline(xintercept = 0)
+```
+
+```{r 5l}
+round(coef(post1), 2)
+```
+
+```{r 5m}
+round(posterior_interval(post1, prob = 0.9), 2)
+```
+
+```{r 5n}
+(loo1 <- loo(post1, save_psis = TRUE)) # smoothed leave-one-out cross-validation (psis-loo) to compute expected log predictive density (elpd)
+```
+
+```{r 5o}
+post0 <- update(post1, formula = isFraud ~ 1, QR = FALSE, refresh=0) # compare to baseline
+```
+
+```{r 5p}
+(loo0 <- loo(post0))
+```
+
+```{r 5r}
+loo_compare(loo0, loo1) # `post1` clearly better, i.e. covariates contain valuable info for predictions
+```
+
+```{r 5s}
+# predicted probabilities
+linpred <- posterior_linpred(post1)
+preds <- posterior_epred(post1)
+pred <- colMeans(preds)
+pr <- as.integer(pred >= 0.5)
+   
+# posterior classification accuracy
+round(mean(xor(pr, as.integer(y == 0))), 2)
+```
+
+```{r 5t}
+# posterior balanced classification accuracy
+round((mean(xor(pr[y == 0] > 0.5, as.integer(y[y == 0])))+mean(xor(pr[y == 1] < 0.5, as.integer(y[y == 1]))))/2, 2)
+```
+
+Now, let's predict on not yet seen data using leave-one-out crossval.
+
+```{r 5u}
+# loo predictive probabilities
+ploo <- E_loo(preds, loo1$psis_object, type = 'mean', log_ratios = -log_lik(post1))$value
+
+# loo classification accuracy
+round(mean(xor(ploo > 0.5, as.integer(y == 0))), 2)
+```
+
+```{r 5v}
+# loo balanced classification accuracy
+round((mean(xor(ploo[y == 0] > 0.5, as.integer(y[y == 0])))+mean(xor(ploo[y == 1] < 0.5,as.integer(y[y == 1]))))/2, 2)
+```
+
+An important consideration, on the face of it, it seems that this performed worse than our plain vanilla model. **But**, (i) we tossed a lot of data to inverse the matrix, which, given more time, we could easily fix by doing a better-balanced sample, and / or by hand-writing the function, _and_ (ii) consider how much more robust (and therefore trustworthy) this is.
+
+Importantly also, unlike regular ML, this is a far more explainable model. That is, not a black box. For robustness, modularity, explainability, regular Bayesian workflow, to my mind, bests all else. As to the "hand-writing the function" bit, we mean not doing a precompiled model from a package, but instead writing our own Stan program, and calling the compiler ourselves, which would more readily handle hierarchical models, and messier datasets.
+
+```{r 5w, fig.align='center', catche=TRUE, echo=TRUE}
+# library(vctrs)
+
+calPlotData <- caret::calibration(y ~ pred + loopred, data = data.frame(pred = pred, loopred = ploo, y = y), cuts = 10, class = '1')
+
+ggplot(calPlotData, auto.key = list(columns = 2)) +
+  theme(panel.background = element_rect(fill = 'azure2'), panel.grid = element_line(color = 'white'),
+        legend.key = element_rect(colour = 'transparent', fill = 'white')) +
+  scale_color_manual(labels = c('pred' = 'Pred', 'loopred' = 'LOO Pred'), values = c('#009999', '#0066CC')) +
+  labs(title = bquote('Calibration of LOO Predictive \nProbabilities and the Posterior'))
+```
+
+Given more time, we could explore some deep learning model, and fix the issues with the sample to boost some Bayesian model.
+

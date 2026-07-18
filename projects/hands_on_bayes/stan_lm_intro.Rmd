@@ -1,0 +1,493 @@
+---
+title: "Hands-on Bayesianism"
+author: "Andrej Arpáš"
+date: "7/7/2022 (NORAM Date)"
+output:
+  html_document:
+    code_folding: show
+    fig_caption: yes
+    highlight: tango
+    theme: yeti
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+subtitle: Frequentist VS Bayesian Regression
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(rstanarm)
+library(rstan)
+```
+
+```{css, echo=FALSE}
+pre {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+pre[class] {
+  max-height: 300px;
+}
+```
+
+# Load the Data
+
+The data and some of the examples are derivatives of [these](http://webpages.math.luc.edu/~ebalderama/bayes_resources/code/mlr_stan.html) [two](https://www4.stat.ncsu.edu/~bjreich/BSMdata/Election.html) (plus a couple more) sources.
+
+What we've got as the dependent variable (`Y`) is the percentage change in the GOP support from 2012 to 2016.
+
+* The independent variables are the below.
+* `pop_change` or population change (percent) between Apr. 1, 2010 and July 1, 2014
+* `age_65+`: persons 65 and older in 2014, percent
+* `black`: blacks or African-Americans alone, percent, 2014
+* `hispanic`: Hispanic or Latino, percent, 2014
+* `hs_grad`: high school graduate or above, percentage of people aged 25+, 2009-2013
+* `undergrad`: Bachelor's degree holder or above, percentage of people aged 25+, 2009-2013
+* `homeownership_rate`: like it says, 2009-2013
+* `median_home_value`: median value of owner-occupied housing units, USD, 2009-2013
+* `median_income`: median household income, USD, 2009-2013
+* `poverty_rate`: persons below poverty level, percent, 2009-2013
+
+```{r 1}
+load('data/election_2008_2016.Rdata')
+
+junk <- is.na(Y + rowSums(X))
+Y <- Y[!junk]
+X <- X[!junk, ]
+X <- X[, 1:10]
+# X <- scale(X) # standardizing covariates (could do, but but since we'll be centering the model matrix, there's no need for this)
+colnames(X) <- c('pop_change', 'age_65+', 'black', 'hispanic', 'hs_grad',
+                 'undergrad', 'homeownership_rate', 'median_home_value', 'median_income', 'poverty_rate')
+
+d <- cbind(Y, as.data.frame(X))
+colnames(d)[1] <- 'gop_support_change'
+```
+
+Note all of these fields (cols) are continuous scale. Try linear regression.
+
+
+# Frequentist `lm()`
+
+You could / should think about what model to use, and the data also leaves something to be desidred, but as an exemplar, we are more interested in comparing notes, and contrasting, than in the actual analysis. We'll therefore proceed to `lm()`.
+
+```{r 2}
+# just throw it in there
+lm_freq <- lm(gop_support_change ~ ., data = d)
+summary(lm_freq)
+```
+
+So we would say that based on this simple (plain vanilla _frequentist_) linear model, for instance, with each unit change (percentage increase in this case) in the proportion of the county being Hispanic, the GOP support in that county drops ~.1526*** percent, where "***" denotes stat. significance > 99.9%.
+
+But how does this compare to an approach we might take with Bayesianism and linear regression? And importantly, does this really make sense?
+
+
+# Bayesian Methods
+
+
+## `rstanarm()`'s `stan_glm()`
+
+* Useful Links
+    + https://mc-stan.org/rstanarm/reference/stan_glm.html
+    + https://mc-stan.org/rstanarm/articles/continuous.html
+    + https://mc-stan.org/rstanarm/articles/lm.html
+    + https://mc-stan.org/bayesplot/reference/MCMC-intervals.html
+    + https://cran.r-project.org/web/packages/bayesplot/vignettes/plotting-mcmc-draws.html
+    + https://psyc-bayes-notes.netlify.app/model-diagnostics.html
+    + https://mc-stan.org/docs/2_18/stan-users-guide/linear-regression.html
+    + https://mc-stan.org/rstan/reference/stanfit2array-method.html
+    + https://mc-stan.org/misc/warnings.html#maximum-treedepth-exceeded
+    + https://mc-stan.org/misc/warnings.html#r-hat
+
+
+(Definition lifted from [here](https://mc-stan.org/rstanarm/): "`rstanarm` is an R package that emulates other R model-fitting functions but uses Stan (via the `rstan` package) for the back-end estimation.")
+
+By not specifying our priors (which is a perfectly valid option), we implicitly use the default weekly informative priors which are set to `normal(0, 10)` for the intercept and `normal(0, 5)` for the other regression coefficients.
+
+```{r 2b, comment=NA, cache=TRUE}
+post1 <- stan_glm(gop_support_change ~ ., data = d,
+                  family = gaussian(link = "identity"),
+                  seed = 42) # could also specify `chains`, `iter`, many other params.
+```
+
+```{r 2c, fig.align='center'}
+summary(post1)
+
+print(post1, digits = 4)
+loo(post1)
+
+draws <- as.data.frame(as.matrix(post1))
+colnames(draws)[1] <- 'intercept'
+```
+
+```{r 2d, fig.align='center'}
+# plot the estimated regression line at each draw from the posterior distribution
+ggplot(d, aes(x = hispanic, y = gop_support_change)) +
+  geom_point(size = 0.3, color = '#003366', alpha = 0.35) +
+  geom_abline(data = draws, aes(intercept = intercept, slope = hispanic),
+              color = "skyblue", size = 0.2, alpha = 0.05) +
+  geom_abline(intercept = coef(post1)[1], slope = coef(post1)[5],
+              color = "skyblue4", size = 1) +
+  theme_minimal()
+```
+
+```{r 2e, fig.align='center'}
+# comparing the distributions of $y$ (observed outcome) and $y_rep$ (simulated datasets
+# from the posterior predictive distribution)
+pp_check(post1, plotfun = "hist", nreps = 5) # seems plausible 
+```
+
+Most ineterstingly perhaps, we can utilize MCMC plots. `mcmc_intervals()` has a default showing 50% intervals (the thick lines), and 90% intervals (the thinner outer segments), with the circular point in the middle representing the median.
+
+```{r 2f, fig.align='center'}
+# plot central posterior uncertainty invervals
+plot(post1, pars = colnames(as.data.frame(post1))[!names(as.data.frame(post1)) %in% c('sigma', '(Intercept)')])
+```
+
+So, for instnace, we might say that the median effect of being Hispanic (net of other factors) is ~-0.15 percent, and that there is not much uncertainty around this value. (Indeed `summary(post1` had the `hispanic` effect at neg. 0.2 `50%`, which is a rounded value.)
+
+By the bye, we can also calculate these probabilites manually using the posterior fit `stanreg` object. For instance, calc. the median effect of `hispanic`. Or to reproduce the median, 1st and 9th decile for the same.
+
+```{r 2g}
+m1 <- as.matrix(post1)
+median(m1[, 'hispanic'])
+
+round(quantile(m1[, 'hispanic'], probs = c(0.1, 0.5, 0.9)), digits = 2) # in line with `summary(post1)`
+```
+
+```{r 2h, fig.align='center'}
+# the quantiles can be changed, for instance `prob` `.8`, and `prob_outer` `.99`
+bayesplot::mcmc_intervals(as.matrix(post1),
+                          pars = colnames(as.data.frame(post1))[!names(as.data.frame(post1)) %in% c('sigma', '(Intercept)')],
+                          prob = 0.8,
+                          prob_outer = 0.99)
+```
+
+Now the thinner outer line is 99% credibility, and the thicker inner line represents 80% credibility around the posterior draws.
+
+We might say that, conditional on the data and the model, there is 99% probability that the net effect of going up a percentage point in the county-level Hispanic / Latino population translates to between ~-0.17 and ~-0.13 change (decrease) in the GOP support in that county.
+
+```{r 2i, fig.align='center'}
+# we can hone in on a few variables, e.g. senior citizenry, poverty rate, and bachelor's educ.
+bayesplot::color_scheme_set('red')
+bayesplot::mcmc_areas(as.matrix(post1), pars = c('`age_65+`', 'undergrad', 'poverty_rate'))
+```
+
+We would say that there is a net positive effect of being "poorer" and aged 65 plus, though there is a distribution around those median values (0.23, and ~0.21, respectively), but a negative effect in terms of the change in the GOP support for persons holding a bachelor's (or higher) around this period, with there being less uncertainty about that value (the distribution being somewhat narrower in the center).
+
+```{r 2j, fig.align='center'}
+# model diagnostics
+bayesplot::color_scheme_set('teal')
+
+pp_check(post1) # , plotfun = 'loo_pit_overlay')
+```
+
+We see that there are some systematic discrepancies between the model-generated (simulated) data and the actual data in that the medians are off somewhat, which could be remedied e.g. by changing our priors.
+
+There are many, many more sophisticated diagnostics tools out there, but for the interest of brevity, I don't include them here.
+
+
+## `rstan()`
+
+Another option (somewhat more interesting) is to do this in `rstan`. The reason being that that requires one to manually specify the model in a Stan program, which presumes a deeper familiarity / comfort with the syntax, and greater understanding of (i) your model, and (ii) Bayesian statistics. There are some workarounds (namely `brms`), but save for that, this is also the approach that promises to deliver potentially greater rewards.
+
+There are two ways to do this. (i) To instantiate a hand-written Stan program, or (ii) the "`stanfit` to `array`" method. While the latter may be faster to type on the fly, there are discrepancies between the two instantiations. (I would also advise to peruse what a Stan program looks like, though, just to gain some familiarity.) Let's start with the first alternative.
+
+
+### Direct Feed
+
+```{r 3.0}
+options(mc.cores = parallel::detectCores())
+```
+
+```{r 3, comment=NA, cache=FALSE, results='hide'}
+# Center/scale predictors for a stabler posterior geometry under modern Stan.
+X_scaled <- scale(as.matrix(d[, 2:11]))
+dat <- list(
+  n = nrow(d),
+  k = ncol(X_scaled),
+  X = X_scaled,
+  Y = d$gop_support_change
+)
+
+post2 <- stan(
+  "mlr.stan",
+  data = dat,
+  chains = 4,
+  warmup = 500,
+  iter = 1000,
+  seed = 42,
+  refresh = 0,
+  control = list(adapt_delta = 0.95, max_treedepth = 12)
+)
+```
+
+Evalueates with a number of warnings, which we'd definitely need to pay attention to. Especially worrisome is the large R-hat, as we should only keep samples with an R-hat less than 1.01. For instance, we could try increasing the number of `iter`s and / or `warmup`. But since we're doing a toy example, and are more interested in the method than the sample itself, we shall cautiously proceed.
+
+```{r 3b}
+summary(post2)
+```
+
+```{r 3c}
+m2 <- as.matrix(post2)
+colnames(m2)[1:11] <- c('(Intercept)', colnames(d)[2:11])
+
+df2 <- as.data.frame(round(quantile(m2[, 'pop_change'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)); colnames(df2) <- 'pop_change'
+df2 <- cbind(as.data.frame(round(quantile(m2[, 3], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df2); colnames(df2)[1] <- 'age_65+'
+df2 <- cbind(as.data.frame(round(quantile(m2[, 'black'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df2); colnames(df2)[1] <- 'black'
+df2 <- cbind(as.data.frame(round(quantile(m2[, 'hispanic'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df2); colnames(df2)[1] <- 'hispanic'
+df2 <- cbind(as.data.frame(round(quantile(m2[, 'hs_grad'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df2); colnames(df2)[1] <- 'hs_grad'
+df2 <- cbind(as.data.frame(round(quantile(m2[, 'undergrad'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df2); colnames(df2)[1] <- 'undergrad'
+df2 <- cbind(as.data.frame(round(quantile(m2[, 'homeownership_rate'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df2); colnames(df2)[1] <- 'homeownership_rate'
+df2 <- cbind(as.data.frame(round(quantile(m2[, 'median_home_value'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df2); colnames(df2)[1] <- 'median_home_value'
+df2 <- cbind(as.data.frame(round(quantile(m2[, 'median_income'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df2); colnames(df2)[1] <- 'median_income'
+df2 <- cbind(as.data.frame(round(quantile(m2[, 'poverty_rate'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df2); colnames(df2)[1] <- 'poverty_rate'
+```
+
+```{r 3d}
+as.tibble(t(df2)) %>%
+  rownames_to_column() %>%
+  mutate(rowname = factor(rowname, levels = c(1:10),
+                          labels = c("poverty_rate", "median_income", "median_home_value", "homeownership_rate", "undergrad",
+                                     "hs_grad", "hispanic", "black", "age_65+", "pop_change")))
+```
+
+```{r 3e, fig.align='center'}
+bayesplot::color_scheme_set('yellow') # viridisB, brightblue
+plot(post2, pars = c('beta[1]', 'beta[2]', 'beta[3]', 'beta[4]', 'beta[5]',
+                     'beta[6]', 'beta[7]', 'beta[8]', 'beta[9]', 'beta[10]'))
+```
+
+```{r 3f, fig.align='center'}
+bayesplot::mcmc_areas(post2, pars = c('beta[4]', 'beta[7]')) + # `hispanic`, `homeownership_rate`
+  labs(title = 'Posterior Distributions') +
+  scale_y_discrete(labels = c('hispanic', 'homeownership_rate')) +
+  scale_x_continuous(limits = c(-0.6, 0.5))
+```
+
+
+### From within R
+
+```{r 4}
+model <- "
+//
+// Simple Stan `lm` Model
+// y = m*x + c
+// y = beta*x + alpha
+data {
+  int<lower=0> n;                       // number of observations (rows)
+  int<lower=0> k;                       // number of predictors / variables (cols)
+  matrix[n,k] X;                        // prediction matrix
+  vector[n] Y;                          // outcome vector
+}
+parameters {
+  real alpha;                           // intercept
+  vector[k] beta;                       // coeff. for predictors
+  real<lower=0> sigma;                  // error term
+}
+model {
+  Y ~ normal(alpha + X * beta, sigma);  // likelihood
+}
+"
+```
+
+```{r 4b}
+n <- length(d[, 1])
+k <- ncol(d[, -1])
+X <- d[, 2:11]
+Y <- d$gop_support_change
+```
+
+```{r 4c}
+model_fit <- function(n, k, X, Y) {
+  data <- list(n = n, k = k, X = X, Y = Y)
+  fitted_model <- stan_model(model_code = model)
+  sampling(
+    fitted_model,
+    data = data,
+    chains = 4,
+    iter = 1000,
+    warmup = 500,
+    seed = 42,
+    refresh = 0,
+    control = list(adapt_delta = 0.95, max_treedepth = 12)
+  )
+}
+```
+
+```{r 4d, comment=NA, cache=FALSE, results='hide'}
+# Use the same scaled design as the file-based Stan fit (legacy note claimed ~9h on unscaled data).
+post3 <- model_fit(n = nrow(X_scaled), k = ncol(X_scaled), X = X_scaled, Y = d$gop_support_change)
+```
+
+```{r 4e}
+summary(post3)
+```
+
+We'd need to increase `max_treedepth`, and R-hat is way too large, indicating that the algorithm isn't quite working, but that would require more debugging, and time to evaluate.
+
+```{r 4f}
+m3 <- as.matrix(post3)
+colnames(m3)[1:11] <- c('(Intercept)', colnames(d)[2:11])
+df3 <- as.data.frame(round(quantile(m3[, 'pop_change'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)); colnames(df3) <- 'pop_change'
+df3 <- cbind(as.data.frame(round(quantile(m3[, 3], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df3); colnames(df3)[1] <- 'age_65+'
+df3 <- cbind(as.data.frame(round(quantile(m3[, 'black'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df3); colnames(df3)[1] <- 'black'
+df3 <- cbind(as.data.frame(round(quantile(m3[, 'hispanic'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df3); colnames(df3)[1] <- 'hispanic'
+df3 <- cbind(as.data.frame(round(quantile(m3[, 'hs_grad'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df3); colnames(df3)[1] <- 'hs_grad'
+df3 <- cbind(as.data.frame(round(quantile(m3[, 'undergrad'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df3); colnames(df3)[1] <- 'undergrad'
+df3 <- cbind(as.data.frame(round(quantile(m3[, 'homeownership_rate'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df3); colnames(df3)[1] <- 'homeownership_rate'
+df3 <- cbind(as.data.frame(round(quantile(m3[, 'median_home_value'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df3); colnames(df3)[1] <- 'median_home_value'
+df3 <- cbind(as.data.frame(round(quantile(m3[, 'median_income'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df3); colnames(df3)[1] <- 'median_income'
+df3 <- cbind(as.data.frame(round(quantile(m3[, 'poverty_rate'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df3); colnames(df3)[1] <- 'poverty_rate'
+```
+
+```{r 4g}
+as.tibble(t(df3)) %>%
+  rownames_to_column() %>%
+  mutate(rowname = factor(rowname, levels = c(1:10),
+                          labels = c("poverty_rate", "median_income", "median_home_value", "homeownership_rate", "undergrad",
+                                     "hs_grad", "hispanic", "black", "age_65+", "pop_change")))
+```
+
+Next up, how about we model a prior predictive and our priors using JQPD (Johnson Quantile Parametrized Distributions) and / or GLD (General Lambda Distribution), which allow one to discard the notion of some predefined distributions, and specify prior beliefs about one's parameters with things like the interquartile range and so on. The benefit of this is that with a couple of functions, you can simulate millions of distributions. Let's look into that next.
+
+```{r 5, include=F}
+# some useful links
+# --> [Gibbs sampling in R](http://webpages.math.luc.edu/~ebalderama/bayes_resources/code/ttest_gibbs.html)
+# --> [Prior predictive, posterior predictive, and cross-validation as graphical models](https://statmodeling.stat.columbia.edu/2020/03/17/prior-predictive-posterior-predictive-and-cross-validation-as-graphical-models/)
+# --> [Bayesian modeling using Stan: A case study](https://fabiandablander.com/r/Law-of-Practice.html) # "prior predictive distribution" stan example
+```
+
+
+## JQPD & GLD
+
+Johnson Quantile-Parameterized Distribution (JQPD) & General Lambda Distribution (GLD).
+
+
+### Prior Distribution
+
+We'll draw `S` times from the prior distribution of GOP support change over a sample `N` of data points, whereby each `S` simulated outcome vector of size `N` has a calcualted prior
+$R{_s^2}=\frac{\frac{1}{N-1}\sum{_{n=1}^N}(\tilde{\mu}{_n}-\overline{\mu})^2}{\tilde{\sigma}{^2}+\frac{1}{N-1}\sum{_{n=1}^N}(\tilde{\mu}{_n}-\overline{\mu})^2}$
+
+with $\overline{\mu}$ being the average of the conditional means over the `N` "observations" in the `s`-th simulaiton. 
+
+```{r 6}
+rstan::expose_stan_functions('quantile_functions.stan')
+source('GLD_helpers.R')
+```
+
+```{r 6b}
+X_ <- model.matrix(gop_support_change ~ ., data = d)[, -1] # toss out intercept
+X_ <- sweep(X_, MARGIN = 2, STATS = colMeans(X_), FUN = `-`) # center cols
+```
+
+```{r 6c, comment=NA, results='hide', warning=F}
+m_alpha = -10.9; s_alpha = 4.1 # normal for intercept (from Freq. `lm`)
+
+# GLD prior for coefficients
+lowers <- c(PC = -0.0005, A = 0.0001, B = -0.0004, H = -0.0004, HS = 0.0023,
+             U = -0.0009, HR = -0.0003, MHV = -0.0003, MI = -0.0003, PR = -0.0004)
+medians <- c(PC = -0.0004, A = 0.00015, B = -0.0003, H = -0.0003, HS = 0.0025,
+             U = -0.0008, HR = -0.0002, MHV = -0.0002, MI = -0.0002, PR = -0.0003)
+uppers <- c(PC = -0.0003, A = 0.0002, B = -0.0002, H = -0.0002, HS = 0.0027,
+             U = -0.0007, HR = -0.0001, MHV = -0.0001, MI = -0.0001, PR = -0.0002)
+ninety <- c(PC = -0.0002, A = 0.00025, B = -0.0001, H = -0.0001, HS = 0.0029,
+             U = -0.0006, HR = 0.00, MHV = 0.00, MI = 0.00, PR = -0.0001)
+a_s <- lapply(1:length(medians), FUN = function(i) {
+  GLD_solver(lowers[i], medians[i], uppers[i], ninety[i], alpha = 0.9)
+}) # why these? inspired by `stan_glm()` from the preceding chunks
+names(a_s) <- names(medians)
+
+# JQPD prior for sigma
+q_sigma <- c(lower = 0.25, median = 0.5, upper = 1)
+```
+
+Get some warnings, and messages, which we need to pay attention to.
+
+```{r 6d}
+R_squared <- replicate(1000, {
+  alpha_ <- rnorm(1, mean = m_alpha, sd = s_alpha) # num. of observations, mu, sigma
+  
+  beta_PC_ <- GLD_rng(medians['PC'], IQR = uppers['PC'] - lowers['PC'],
+                      asymmetry = a_s$PC[1], steepness = a_s$PC[2])
+  beta_A_ <- GLD_rng(medians['A'], IQR = uppers['A'] - lowers['A'],
+                     asymmetry = a_s$A[1], steepness = a_s$A[2])
+  beta_B_ <- GLD_rng(medians['B'], IQR = uppers['B'] - lowers['B'],
+                     asymmetry = a_s$B[1], steepness = a_s$B[2])
+  beta_H_ <- GLD_rng(medians['H'], IQR = uppers['H'] - lowers['H'],
+                     asymmetry = a_s$H[1], steepness = a_s$H[2])
+  beta_HS_ <- GLD_rng(medians['HS'], IQR = uppers['HS'] - lowers['HS'],
+                      asymmetry = a_s$HS[1], steepness = a_s$HS[2])
+  beta_U_ <- GLD_rng(medians['U'], IQR = uppers['U'] - lowers['U'],
+                     asymmetry = a_s$U[1], steepness = a_s$U[2])
+  beta_HR_ <- GLD_rng(medians['HR'], IQR = uppers['HR'] - lowers['HR'],
+                      asymmetry = a_s$HR[1], steepness = a_s$HR[2])
+  beta_MHV_ <- GLD_rng(medians['MHV'], IQR = uppers['MHV'] - lowers['MHV'],
+                      asymmetry = a_s$MHV[1], steepness = a_s$MHV[2])
+  beta_MI_ <- GLD_rng(medians['MI'], IQR = uppers['MI'] - lowers['MI'],
+                      asymmetry = a_s$MI[1], steepness = a_s$MI[2])
+  beta_PR_ <- GLD_rng(medians['PR'], IQR = uppers['PR'] - lowers['PR'],
+                      asymmetry = a_s$PR[1], steepness = a_s$PR[2])
+  
+  mu_ <- alpha_ + beta_PC_ * X_[, 'pop_change'] + beta_A_ * X_[, '`age_65+`'] +
+         beta_B_ * X_[, 'black'] + beta_H_ * X_[, 'hispanic'] + beta_HS_ * X_[, 'hs_grad'] +
+         beta_U_ * X_[, 'undergrad'] + beta_HR_ * X_[, 'homeownership_rate'] + beta_MHV_ * X_[, 'median_home_value'] +
+         beta_MI_ * X_[, 'median_income'] + beta_PR_ * X_[, 'poverty_rate']
+  sigma_ <- JQPDS_rng(lower_bound = 0, alpha = 0.25, quantiles = q_sigma)
+  numer <- var(mu_)
+  denom <- sigma_^2 + numer
+  R_squared_ <- numer / denom
+  R_squared_
+})
+summary(R_squared)
+```
+
+
+### Drawing from the Posterior
+
+```{r 7, comment=NA, cache=TRUE, results='hide'}
+post4 <- stan_lm(gop_support_change ~ ., data = d,
+                 prior = R2(location = median(R_squared), what = 'median'),
+                 prior_intercept = normal(location = m_alpha, scale = s_alpha, autoscale = FALSE))
+```
+
+```{r 7b}
+print(post4, digits = 2)
+```
+
+
+### Check
+
+```{r 8}
+bayesplot::color_scheme_set('brightblue') # viridisB, yellow
+bayesplot::ppc_intervals(y = d$gop_support_change, yrep = posterior_predict(post4),
+                         x = d$hispanic) + ggplot2::xlab('hispanic') # pp_check(post4)
+```
+
+```{r 8b}
+m4 <- as.matrix(post4)
+colnames(m4)[1:11] <- c('(Intercept)', colnames(d)[2:11])
+
+df4 <- as.data.frame(round(quantile(m4[, 'pop_change'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)); colnames(df4) <- 'pop_change'
+df4 <- cbind(as.data.frame(round(quantile(m4[, 3], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df4); colnames(df4)[1] <- 'age_65+'
+df4 <- cbind(as.data.frame(round(quantile(m4[, 'black'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df4); colnames(df4)[1] <- 'black'
+df4 <- cbind(as.data.frame(round(quantile(m4[, 'hispanic'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df4); colnames(df4)[1] <- 'hispanic'
+df4 <- cbind(as.data.frame(round(quantile(m4[, 'hs_grad'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df4); colnames(df4)[1] <- 'hs_grad'
+df4 <- cbind(as.data.frame(round(quantile(m4[, 'undergrad'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df4); colnames(df4)[1] <- 'undergrad'
+df4 <- cbind(as.data.frame(round(quantile(m4[, 'homeownership_rate'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df4); colnames(df4)[1] <- 'homeonwership_rate'
+df4 <- cbind(as.data.frame(round(quantile(m4[, 'median_home_value'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df4); colnames(df4)[1] <- 'median_home_value'
+df4 <- cbind(as.data.frame(round(quantile(m4[, 'median_income'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df4); colnames(df4)[1] <- 'median_income'
+df4 <- cbind(as.data.frame(round(quantile(m4[, 'poverty_rate'], probs = c(0.025, 0.25, 0.5, 0.75, 0.975)), digits = 2)), df4); colnames(df4)[1] <- 'poverty_rate'
+```
+
+```{r 8c}
+as.tibble(t(df4)) %>%
+  rownames_to_column() %>%
+  mutate(rowname = factor(rowname, levels = c(1:10),
+                          labels = c("poverty_rate", "median_income", "median_home_value", "homeownership_rate", "undergrad",
+                                     "hs_grad", "hispanic", "black", "age_65+", "pop_change")))
+```
+
+So, what shall we say as a conclusion? It may not be quite trivial to "guess" the prior stuff using quantile functions. But, the tradeoff is that we can dispense with pre-defined distributions. This is arguably a cleverer approach, but more difficult to implement.
+
