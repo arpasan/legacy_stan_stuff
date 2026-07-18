@@ -1,0 +1,322 @@
+---
+title: "Modeling Hourly Wages Using Stan"
+author: "Andrej Arpáš"
+date: "March 2020"
+output:
+  html_document:
+    code_folding: show
+    fig_caption: true
+    highlight: tango
+    theme: yeti
+    toc: true
+    toc_depth: 3
+    toc_float: true
+subtitle: Prior elicitation with GLD / J-QPD helpers and Bayesian log-wage regression
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  comment = NA,
+  fig.align = "center",
+  fig.width = 7,
+  fig.height = 4.2,
+  dpi = 150,
+  cache = TRUE
+)
+
+library(tidyverse)
+library(rstan)
+library(rstanarm)
+library(bayesplot)
+library(loo)
+library(scales)
+
+options(mc.cores = max(1L, parallel::detectCores() - 1L))
+rstan_options(auto_write = TRUE)
+set.seed(42)
+
+color_scheme_set("teal")
+col_line <- "#2ec4b6"
+```
+
+# 1. Modeling HW with Data from the Current Population Survey (CPS)
+
+This note is a Bayesian hourly-wage regression with weakly informative priors elicited via quantile-parameterized distributions (GLD / J-QPD helpers in Stan). The directed structure is the simple regression sketched below: log real wages depend on gender, race, marital status, and age (in decades), plus an intercept and Gaussian noise.
+
+```{r dag, echo=FALSE, fig.cap="Hand-drawn model diagram from the original write-up.", out.width="85%"}
+knitr::include_graphics("figures/model_dag.jpg")
+```
+
+Data: CEPR CPS ORG Uniform Extracts (March 2019; see `data/README.md`). Variable names follow the CEPR conventions used in the original project (`rw`, `female`, `wbho`, `married`, `age`). Exact vintage from the 2020 HTML is unavailable, so summaries will not match that page digit-for-digit; the elicitation workflow and model class do.
+
+## 1.1 Prior predictive distribution: a simple model
+
+```{r expose-gld}
+rstan::expose_stan_functions("stan/quantile_functions.stan")
+source("R/GLD_helpers.R")
+
+cps_raw <- readr::read_csv("data/cps_cepr_org_2019_march.csv", show_col_types = FALSE)
+summary(cps_raw$rw)
+```
+
+NB I am recoding the `wbho` variable (Race) to be a Boolean (Non-White) 1/0. That recode is already applied in the extract.
+
+```{r cps-complete}
+cps <- cps_raw |>
+  filter(
+    !is.na(rw), rw > 0,
+    !is.na(female), !is.na(wbho), !is.na(married), !is.na(age_dec)
+  )
+
+tibble(
+  n_raw = nrow(cps_raw),
+  n_complete = nrow(cps),
+  mean_rw = mean(cps$rw),
+  median_rw = median(cps$rw)
+)
+```
+
+Now, using the theoretical model above — where I think that one’s gender, race, marital status, and age (in decades) have a bearing on one’s hourly wages, plus some intercept and an error term — let’s construct some prior predictive distribution…
+
+```{r gld-priors}
+set.seed(42)
+# y = alpha + beta * x
+# b1/Female, b2/Race (Non-White), b3/Married, b4/Age^2 (in decades)
+# NB Median should be about equidistant between the lower and upper quartiles.
+
+(a_s1 <- GLD_solver(
+  lower_quartile = -0.3, median = -0.2, upper_quartile = -0.1,
+  other_quantile = 0.2, alpha = 0.9
+))
+(a_s2 <- GLD_solver(
+  lower_quartile = -0.01, median = 0, upper_quartile = 0.01,
+  other_quantile = 0.03, alpha = 0.9
+))
+(a_s3 <- GLD_solver(
+  lower_quartile = 0.3, median = 0.5, upper_quartile = 0.65,
+  other_quantile = 0.85, alpha = 0.9
+))
+(a_s4 <- GLD_solver(
+  lower_quartile = 0, median = 0.2, upper_quartile = 0.3,
+  other_quantile = 0.5, alpha = 0.9
+))
+```
+
+## 1.2 Drawing from the prior predictive distribution
+
+```{r prior-predictive}
+m_alpha <- log(16)
+s_alpha <- 0.1 # Normal prior for alpha near typical median wage.
+q_sigma <- c(lower = 0.25, median = 1, upper = 2)
+
+d <- model.matrix(
+  log(rw) ~ female + wbho + married + age_dec,
+  data = cps
+)[, -1]
+d <- sweep(d, MARGIN = 2, STATS = colMeans(d), FUN = `-`)
+
+n_draws <- 1000L
+ppd <- matrix(NA_real_, nrow = nrow(d), ncol = n_draws)
+r_squared <- numeric(n_draws)
+
+for (j in seq_len(n_draws)) {
+  alpha_ <- rnorm(1, mean = m_alpha, sd = s_alpha)
+  sigma_ <- JQPDS_rng(lower_bound = 0, alpha = 0.25, quantiles = q_sigma)
+  beta1_ <- GLD_rng(
+    median = -0.2, IQR = -0.1 - (-0.3),
+    asymmetry = a_s1[1], steepness = a_s1[2]
+  )
+  beta2_ <- GLD_rng(
+    median = 0, IQR = 0.01 - (-0.01),
+    asymmetry = a_s2[1], steepness = a_s2[2]
+  )
+  beta3_ <- GLD_rng(
+    median = 0.5, IQR = 0.65 - 0.3,
+    asymmetry = a_s3[1], steepness = a_s3[2]
+  )
+  beta4_ <- GLD_rng(
+    median = 0.2, IQR = 0.3 - 0,
+    asymmetry = a_s4[1], steepness = a_s4[2]
+  )
+  mu_ <- alpha_ +
+    beta1_ * d[, "female"] +
+    beta2_ * d[, "wbho"] +
+    beta3_ * d[, "married"] +
+    beta4_ * (d[, "age_dec"]^2)
+  epsilon_ <- rnorm(n = length(mu_), mean = 0, sd = sigma_)
+  y_ <- mu_ + epsilon_
+  ppd[, j] <- y_
+  r_squared[j] <- stats::var(mu_) / stats::var(y_)
+}
+
+summary(r_squared)
+round(quantile(c(exp(ppd)), probs = 1:9 / 10), digits = 3)
+
+tibble(r2 = r_squared) |>
+  ggplot(aes(r2)) +
+  geom_density(fill = alpha(col_line, 0.35), colour = NA) +
+  labs(
+    x = expression(R^2),
+    y = "Density",
+    title = "Prior-predictive distribution of R-squared"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid.minor = element_blank())
+```
+
+## 1.3 Drawing from the posterior distribution
+
+The 2020 write-up used Gaussian `stan_lm` on $\log(\mathrm{rw})$ with an $R^2$ prior at the prior-predictive median, high `adapt_delta`, and age entering only as $\mathrm{age\_dec}^2$. That specification is fit first as the **historical baseline**. LOO comparison then prefers a richer age mean ($\mathrm{age\_dec} + \mathrm{age\_dec}^2$); that richer fit is the **preferred** model for interpretation below.
+
+```{r stan-lm}
+r2_loc <- median(r_squared, na.rm = TRUE)
+
+post_quad <- stan_lm(
+  log(rw) ~ female + wbho + married + I(age_dec^2),
+  data = cps,
+  prior_intercept = normal(location = m_alpha, scale = s_alpha, autoscale = FALSE),
+  prior = R2(location = r2_loc, what = "median"),
+  chains = 4,
+  iter = 2000,
+  warmup = 1000,
+  adapt_delta = 0.999,
+  seed = 42,
+  refresh = 0
+)
+
+post <- stan_lm(
+  log(rw) ~ female + wbho + married + age_dec + I(age_dec^2),
+  data = cps,
+  prior_intercept = normal(location = m_alpha, scale = s_alpha, autoscale = FALSE),
+  prior = R2(location = r2_loc, what = "median"),
+  chains = 4,
+  iter = 2000,
+  warmup = 1000,
+  adapt_delta = 0.999,
+  seed = 43,
+  refresh = 0
+)
+
+cat("Historical baseline (age_dec^2 only):\n")
+print(post_quad, digits = 4)
+cat("\nPreferred model (age_dec + age_dec^2):\n")
+print(post, digits = 4)
+```
+
+```{r mcmc-diagnostics, fig.height=4.6}
+rh <- rhat(post)
+ne <- neff_ratio(post)
+n_div <- sum(nuts_params(post) |>
+  filter(Parameter == "divergent__") |>
+  pull(Value))
+
+tibble(
+  model = "preferred (age_dec + age_dec^2)",
+  max_rhat = max(rh, na.rm = TRUE),
+  min_neff_ratio = min(ne, na.rm = TRUE),
+  n_divergent = n_div,
+  r2_prior_location = r2_loc
+)
+
+mcmc_rhat(rh) + yaxis_text(hjust = 1) + theme_minimal(base_size = 10)
+```
+
+## 1.4 Interpreting the posterior coefficients
+
+Coefficients are on the log-wage scale (preferred model). A negative `female` coefficient means lower expected log wages for women, holding the other covariates fixed; `wbho` (Non-White) is similarly signed in the original write-up; `married` and the age terms pick up the remaining associations.
+
+```{r coef-signs}
+posterior_interval(post, prob = 0.9) |>
+  as.data.frame() |>
+  tibble::rownames_to_column("parameter") |>
+  as_tibble()
+```
+
+Somewhat predictably different, perhaps, in the direction but not so in the magnitude, one might say — relative to the GLD prior medians used above.
+
+```{r bayesplot-areas, fig.height=4.8}
+# Split scales: age coefficients are much smaller than binary-covariate effects.
+pars_main <- c("female", "wbho", "married", "sigma")
+pars_age <- c("age_dec", "I(age_dec^2)")
+
+mcmc_areas(
+  as.array(post),
+  pars = pars_main,
+  prob = 0.9,
+  prob_outer = 0.95
+) +
+  labs(title = "Posterior marginals (main coefficients and sigma)") +
+  theme_minimal(base_size = 11)
+
+mcmc_areas(
+  as.array(post),
+  pars = pars_age,
+  prob = 0.9,
+  prob_outer = 0.95
+) +
+  labs(title = "Posterior marginals for age terms (own scale)") +
+  theme_minimal(base_size = 11)
+```
+
+```{r pairs-plot, fig.width=7.2, fig.height=7.2}
+# Focused pairs: regression coefficients + sigma (omit R2 / log-fit clutter).
+mcmc_pairs(
+  as.array(post),
+  pars = c("female", "wbho", "married", "age_dec", "I(age_dec^2)", "sigma"),
+  off_diag_args = list(size = 0.25, alpha = 0.25)
+)
+```
+
+## 1.5 Model diagnostics and calibration
+
+```{r loo-compare}
+loo_quad <- loo(post_quad, save_psis = TRUE)
+loo_pref <- loo(post, save_psis = TRUE)
+print(loo_compare(loo_quad, loo_pref))
+
+tibble(
+  model = c("age_dec^2 only (2020 baseline)", "age_dec + age_dec^2 (preferred)"),
+  elpd_loo = c(
+    loo_quad$estimates["elpd_loo", "Estimate"],
+    loo_pref$estimates["elpd_loo", "Estimate"]
+  ),
+  p_loo = c(
+    loo_quad$estimates["p_loo", "Estimate"],
+    loo_pref$estimates["p_loo", "Estimate"]
+  )
+) |>
+  arrange(desc(elpd_loo))
+```
+
+```{r ppchecks, fig.height=3.8}
+pp_check(post, plotfun = "dens_overlay", nreps = 50) +
+  labs(title = "PPC: density overlay (log real wage, preferred model)") +
+  theme_minimal(base_size = 11)
+
+pp_check(post, plotfun = "stat_2d", stat = c("mean", "sd")) +
+  labs(title = "PPC: mean and SD of log wages") +
+  theme_minimal(base_size = 11)
+```
+
+```{r loo-pit, fig.height=3.8}
+# LOO-PIT: floating-point / PSIS edge cases can yield PIT slightly above 1
+# (bayesplot rounds those to 1). A wavy curve is the substantive signal.
+# Compare baseline vs preferred without flooding the HTML with warnings.
+pit_quad <- suppressWarnings(pp_check(post_quad, plotfun = "loo_pit_overlay"))
+pit_pref <- suppressWarnings(pp_check(post, plotfun = "loo_pit_overlay"))
+
+pit_quad +
+  labs(title = "LOO-PIT: 2020 baseline (age_dec^2 only)") +
+  theme_minimal(base_size = 11)
+
+pit_pref +
+  labs(title = "LOO-PIT: preferred (age_dec + age_dec^2)") +
+  theme_minimal(base_size = 11)
+```
+
+We see that the quadratic-only model — as in the original note — is often a bit lacking in the lower tail. Adding a linear age term improves ELPD substantially and is the preferred fit here; residual lower-tail tension on the PIT plot is the honest remaining limitation (measurement error and heteroskedasticity in CPS wages are the usual suspects).
+
+Divergent transitions are mitigated with `adapt_delta = 0.999`. If any remain in the pairs plot, further simplifying the geometry would be the next modeling step.
