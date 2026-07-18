@@ -11,7 +11,6 @@ output:
     toc: true
     toc_depth: 3
     toc_float: true
-subtitle: Prior elicitation with GLD / J-QPD helpers and Bayesian log-wage regression
 ---
 
 ```{r setup, include=FALSE}
@@ -32,14 +31,12 @@ library(rstan)
 library(rstanarm)
 library(bayesplot)
 library(loo)
-library(scales)
 
 options(mc.cores = max(1L, parallel::detectCores() - 1L))
 rstan_options(auto_write = TRUE)
 set.seed(42)
-
-color_scheme_set("teal")
-col_line <- "#2ec4b6"
+# Default bayesplot scheme for this project (do not borrow other projects' palettes).
+color_scheme_set("blue")
 ```
 
 # 1. Modeling HW with Data from the Current Population Survey (CPS)
@@ -154,17 +151,6 @@ for (j in seq_len(n_draws)) {
 
 summary(r_squared)
 round(quantile(c(exp(ppd)), probs = 1:9 / 10), digits = 3)
-
-tibble(r2 = r_squared) |>
-  ggplot(aes(r2)) +
-  geom_density(fill = alpha(col_line, 0.35), colour = NA) +
-  labs(
-    x = expression(R^2),
-    y = "Density",
-    title = "Prior-predictive distribution of R-squared"
-  ) +
-  theme_minimal(base_size = 11) +
-  theme(panel.grid.minor = element_blank())
 ```
 
 ## 1.3 Drawing from the posterior distribution
@@ -238,36 +224,22 @@ posterior_interval(post, prob = 0.9) |>
 Somewhat predictably different, perhaps, in the direction but not so in the magnitude, one might say — relative to the GLD prior medians used above.
 
 ```{r bayesplot-areas, fig.height=4.8}
-# Split scales: age coefficients are much smaller than binary-covariate effects.
-pars_main <- c("female", "wbho", "married", "sigma")
-pars_age <- c("age_dec", "I(age_dec^2)")
-
-mcmc_areas(
+# Same ridge style as the original note. Age terms are plotted separately so a
+# shared axis does not flatten them into a spike at zero.
+mcmc_areas_ridges(
   as.array(post),
-  pars = pars_main,
-  prob = 0.9,
-  prob_outer = 0.95
-) +
-  labs(title = "Posterior marginals (main coefficients and sigma)") +
-  theme_minimal(base_size = 11)
+  pars = c("female", "wbho", "married", "sigma")
+)
 
-mcmc_areas(
+mcmc_areas_ridges(
   as.array(post),
-  pars = pars_age,
-  prob = 0.9,
-  prob_outer = 0.95
-) +
-  labs(title = "Posterior marginals for age terms (own scale)") +
-  theme_minimal(base_size = 11)
+  pars = c("age_dec", "I(age_dec^2)")
+)
 ```
 
-```{r pairs-plot, fig.width=7.2, fig.height=7.2}
-# Focused pairs: regression coefficients + sigma (omit R2 / log-fit clutter).
-mcmc_pairs(
-  as.array(post),
-  pars = c("female", "wbho", "married", "age_dec", "I(age_dec^2)", "sigma"),
-  off_diag_args = list(size = 0.25, alpha = 0.25)
-)
+```{r pairs-plot, fig.width=7, fig.height=7}
+# Original pairs view: coefficients + mean_PPD; exclude intercept / R2 / sigma labels soup.
+pairs(post, regex_pars = "^[^(lRs]")
 ```
 
 ## 1.5 Model diagnostics and calibration
@@ -292,29 +264,17 @@ tibble(
 ```
 
 ```{r ppchecks, fig.height=3.8}
-pp_check(post, plotfun = "dens_overlay", nreps = 50) +
-  labs(title = "PPC: density overlay (log real wage, preferred model)") +
-  theme_minimal(base_size = 11)
-
-pp_check(post, plotfun = "stat_2d", stat = c("mean", "sd")) +
-  labs(title = "PPC: mean and SD of log wages") +
-  theme_minimal(base_size = 11)
+pp_check(post, plotfun = "dens_overlay", nreps = 50)
+pp_check(post, plotfun = "stat_2d", stat = c("mean", "sd"))
 ```
 
 ```{r loo-pit, fig.height=3.8}
 # LOO-PIT: floating-point / PSIS edge cases can yield PIT slightly above 1
 # (bayesplot rounds those to 1). A wavy curve is the substantive signal.
-# Compare baseline vs preferred without flooding the HTML with warnings.
 pit_quad <- suppressWarnings(pp_check(post_quad, plotfun = "loo_pit_overlay"))
 pit_pref <- suppressWarnings(pp_check(post, plotfun = "loo_pit_overlay"))
-
-pit_quad +
-  labs(title = "LOO-PIT: 2020 baseline (age_dec^2 only)") +
-  theme_minimal(base_size = 11)
-
-pit_pref +
-  labs(title = "LOO-PIT: preferred (age_dec + age_dec^2)") +
-  theme_minimal(base_size = 11)
+pit_quad
+pit_pref
 ```
 
 We see that the quadratic-only model — as in the original note — is often a bit lacking in the lower tail. Adding a linear age term improves ELPD substantially and is the preferred fit here; residual lower-tail tension on the PIT plot is the honest remaining limitation (measurement error and heteroskedasticity in CPS wages are the usual suspects).
