@@ -2,8 +2,12 @@
 **/.Rhistory
 **/*_cache/
 **/*_files/
-projects/**/data/transactions.txt
-projects/**/data/*.zip
 *.rds
-projects/cdss_hackathon_2020/data/google_mobility.csv
 AGENTS.md
+
+# Optional full Capital One dump (sample ships in-repo)
+predicting_credit_fraud/data/transactions.txt
+predicting_credit_fraud/data/*.zip
+
+# Optional full Google Mobility dump (SWE/DEN extract ships in-repo)
+cdss_hackathon_2020/data/google_mobility.csv
