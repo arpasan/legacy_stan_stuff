@@ -11,6 +11,7 @@ output:
     toc: true
     toc_depth: 3
     toc_float: true
+subtitle: "Plot revision 2026-07-18b — default bayesplot blue; prior R² density removed"
 ---
 
 ```{r setup, include=FALSE}
