@@ -11,6 +11,8 @@ output:
     toc: yes
     toc_depth: 3
     toc_float: yes
+    includes:
+      in_header: header_nocache.html
 substitute: Capital One Data Science Challenge
 ---
 
@@ -806,6 +808,8 @@ ggplot(calPlotData, auto.key = list(columns = 2)) +
 ```
 
 ## Model 3: Horseshoe logistic via CmdStanPy
+
+<em>Revision 2026-07-18c — Model 3 chart source cleaned to match this document’s style.</em>
 
 One more Bayesian attempt — not a model zoo. Model 1’s sklearn $\ell_2$ logit is the bar to clear (**70.48%** holdout accuracy on this balanced extract). Model 2’s flat `stan_glm` logit is more honest about uncertainty but lands nearer 60% under LOO. Here we stay fully Bayesian and try to beat Model 1 on the **same frame and split**.
 
