@@ -3364,50 +3364,47 @@ feature space rather than a giant sparse dummy design.</p>
 ## avg_precision        0.750662
 ## brier                0.209817
 ## dtype: float64</code></pre>
-<div class="sourceCode" id="cb126"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb126-1"><a href="#cb126-1" tabindex="-1"></a><span class="co">#-#-#-#-#-#-#-</span></span>
-<span id="cb126-2"><a href="#cb126-2" tabindex="-1"></a><span class="co">#- CHUNK #1 #-</span></span>
-<span id="cb126-3"><a href="#cb126-3" tabindex="-1"></a><span class="co">#-#-#-#-#-#-#-</span></span>
-<span id="cb126-4"><a href="#cb126-4" tabindex="-1"></a><span class="co"># One chart, USER_RULES notebook aesthetics (this project only): hatched KDEs</span></span>
-<span id="cb126-5"><a href="#cb126-5" tabindex="-1"></a><span class="co"># of holdout predictive scores under the horseshoe model, by true label.</span></span>
-<span id="cb126-6"><a href="#cb126-6" tabindex="-1"></a></span>
-<span id="cb126-7"><a href="#cb126-7" tabindex="-1"></a>plt.rcParams[<span class="st">&quot;figure.dpi&quot;</span>] <span class="op">=</span> <span class="dv">150</span></span>
-<span id="cb126-8"><a href="#cb126-8" tabindex="-1"></a>plt.rcParams[<span class="st">&quot;hatch.linewidth&quot;</span>] <span class="op">=</span> <span class="fl">0.5</span></span>
-<span id="cb126-9"><a href="#cb126-9" tabindex="-1"></a>myFont <span class="op">=</span> {<span class="st">&quot;family&quot;</span>: <span class="st">&quot;monospace&quot;</span>}</span>
-<span id="cb126-10"><a href="#cb126-10" tabindex="-1"></a>plt.rc(<span class="st">&quot;font&quot;</span>, <span class="op">**</span>myFont)</span>
-<span id="cb126-11"><a href="#cb126-11" tabindex="-1"></a>sns.set_style(<span class="st">&quot;white&quot;</span>)</span>
+<div class="sourceCode" id="cb126"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb126-1"><a href="#cb126-1" tabindex="-1"></a><span class="co"># One chart, USER_RULES notebook aesthetics (this project only): hatched KDEs</span></span>
+<span id="cb126-2"><a href="#cb126-2" tabindex="-1"></a><span class="co"># of holdout predictive scores under the horseshoe model, by true label.</span></span>
+<span id="cb126-3"><a href="#cb126-3" tabindex="-1"></a></span>
+<span id="cb126-4"><a href="#cb126-4" tabindex="-1"></a>plt.rcParams[<span class="st">&quot;figure.dpi&quot;</span>] <span class="op">=</span> <span class="dv">150</span></span>
+<span id="cb126-5"><a href="#cb126-5" tabindex="-1"></a>plt.rcParams[<span class="st">&quot;hatch.linewidth&quot;</span>] <span class="op">=</span> <span class="fl">0.5</span></span>
+<span id="cb126-6"><a href="#cb126-6" tabindex="-1"></a>myFont <span class="op">=</span> {<span class="st">&quot;family&quot;</span>: <span class="st">&quot;monospace&quot;</span>}</span>
+<span id="cb126-7"><a href="#cb126-7" tabindex="-1"></a>plt.rc(<span class="st">&quot;font&quot;</span>, <span class="op">**</span>myFont)</span>
+<span id="cb126-8"><a href="#cb126-8" tabindex="-1"></a>sns.set_style(<span class="st">&quot;white&quot;</span>)</span>
+<span id="cb126-9"><a href="#cb126-9" tabindex="-1"></a></span>
+<span id="cb126-10"><a href="#cb126-10" tabindex="-1"></a>palette <span class="op">=</span> sns.color_palette(<span class="st">&quot;mako_r&quot;</span>, <span class="dv">10</span>)[::<span class="dv">3</span>]</span>
+<span id="cb126-11"><a href="#cb126-11" tabindex="-1"></a>col0, col1 <span class="op">=</span> palette[<span class="dv">0</span>], palette[<span class="dv">1</span>]</span>
 <span id="cb126-12"><a href="#cb126-12" tabindex="-1"></a></span>
-<span id="cb126-13"><a href="#cb126-13" tabindex="-1"></a>palette <span class="op">=</span> sns.color_palette(<span class="st">&quot;mako_r&quot;</span>, <span class="dv">10</span>)[::<span class="dv">3</span>]</span>
-<span id="cb126-14"><a href="#cb126-14" tabindex="-1"></a>col0, col1 <span class="op">=</span> palette[<span class="dv">0</span>], palette[<span class="dv">1</span>]</span>
-<span id="cb126-15"><a href="#cb126-15" tabindex="-1"></a></span>
-<span id="cb126-16"><a href="#cb126-16" tabindex="-1"></a>fig, ax <span class="op">=</span> plt.subplots(figsize<span class="op">=</span>(<span class="fl">7.2</span>, <span class="fl">4.2</span>))</span>
-<span id="cb126-17"><a href="#cb126-17" tabindex="-1"></a><span class="cf">for</span> lab, col, hatch <span class="kw">in</span> [</span>
-<span id="cb126-18"><a href="#cb126-18" tabindex="-1"></a>    (<span class="dv">0</span>, col0, <span class="st">&quot;////&quot;</span>),</span>
-<span id="cb126-19"><a href="#cb126-19" tabindex="-1"></a>    (<span class="dv">1</span>, col1, <span class="st">&quot;</span><span class="ch">\\\\\\\\</span><span class="st">&quot;</span>),</span>
-<span id="cb126-20"><a href="#cb126-20" tabindex="-1"></a>]:</span>
-<span id="cb126-21"><a href="#cb126-21" tabindex="-1"></a>    vals <span class="op">=</span> p_te[y_te.to_numpy() <span class="op">==</span> lab]</span>
-<span id="cb126-22"><a href="#cb126-22" tabindex="-1"></a>    sns.kdeplot(</span>
-<span id="cb126-23"><a href="#cb126-23" tabindex="-1"></a>        vals,</span>
-<span id="cb126-24"><a href="#cb126-24" tabindex="-1"></a>        ax<span class="op">=</span>ax,</span>
-<span id="cb126-25"><a href="#cb126-25" tabindex="-1"></a>        color<span class="op">=</span>col,</span>
-<span id="cb126-26"><a href="#cb126-26" tabindex="-1"></a>        fill<span class="op">=</span><span class="va">False</span>,</span>
-<span id="cb126-27"><a href="#cb126-27" tabindex="-1"></a>        linewidth<span class="op">=</span><span class="fl">1.2</span>,</span>
-<span id="cb126-28"><a href="#cb126-28" tabindex="-1"></a>        label<span class="op">=</span><span class="st">&quot;non-fraud&quot;</span> <span class="cf">if</span> lab <span class="op">==</span> <span class="dv">0</span> <span class="cf">else</span> <span class="st">&quot;fraud&quot;</span>,</span>
-<span id="cb126-29"><a href="#cb126-29" tabindex="-1"></a>    )</span>
-<span id="cb126-30"><a href="#cb126-30" tabindex="-1"></a>    <span class="im">from</span> scipy.stats <span class="im">import</span> gaussian_kde</span>
-<span id="cb126-31"><a href="#cb126-31" tabindex="-1"></a></span>
-<span id="cb126-32"><a href="#cb126-32" tabindex="-1"></a>    grid <span class="op">=</span> np.linspace(<span class="fl">0.0</span>, <span class="fl">1.0</span>, <span class="dv">256</span>)</span>
-<span id="cb126-33"><a href="#cb126-33" tabindex="-1"></a>    dens <span class="op">=</span> gaussian_kde(vals)(grid)</span>
-<span id="cb126-34"><a href="#cb126-34" tabindex="-1"></a>    ax.fill_between(</span>
-<span id="cb126-35"><a href="#cb126-35" tabindex="-1"></a>        grid,</span>
-<span id="cb126-36"><a href="#cb126-36" tabindex="-1"></a>        dens,</span>
-<span id="cb126-37"><a href="#cb126-37" tabindex="-1"></a>        alpha<span class="op">=</span><span class="fl">0.25</span>,</span>
-<span id="cb126-38"><a href="#cb126-38" tabindex="-1"></a>        facecolor<span class="op">=</span><span class="st">&quot;none&quot;</span>,</span>
-<span id="cb126-39"><a href="#cb126-39" tabindex="-1"></a>        edgecolor<span class="op">=</span>col,</span>
-<span id="cb126-40"><a href="#cb126-40" tabindex="-1"></a>        hatch<span class="op">=</span>hatch,</span>
-<span id="cb126-41"><a href="#cb126-41" tabindex="-1"></a>        linewidth<span class="op">=</span><span class="fl">0.0</span>,</span>
-<span id="cb126-42"><a href="#cb126-42" tabindex="-1"></a>    )</span>
-<span id="cb126-43"><a href="#cb126-43" tabindex="-1"></a></span>
-<span id="cb126-44"><a href="#cb126-44" tabindex="-1"></a>ax.set_xlim(<span class="fl">0.0</span>, <span class="fl">1.0</span>)</span></code></pre></div>
+<span id="cb126-13"><a href="#cb126-13" tabindex="-1"></a>fig, ax <span class="op">=</span> plt.subplots(figsize<span class="op">=</span>(<span class="fl">7.2</span>, <span class="fl">4.2</span>))</span>
+<span id="cb126-14"><a href="#cb126-14" tabindex="-1"></a><span class="cf">for</span> lab, col, hatch <span class="kw">in</span> [</span>
+<span id="cb126-15"><a href="#cb126-15" tabindex="-1"></a>    (<span class="dv">0</span>, col0, <span class="st">&quot;////&quot;</span>),</span>
+<span id="cb126-16"><a href="#cb126-16" tabindex="-1"></a>    (<span class="dv">1</span>, col1, <span class="st">&quot;</span><span class="ch">\\\\\\\\</span><span class="st">&quot;</span>),</span>
+<span id="cb126-17"><a href="#cb126-17" tabindex="-1"></a>]:</span>
+<span id="cb126-18"><a href="#cb126-18" tabindex="-1"></a>    vals <span class="op">=</span> p_te[y_te.to_numpy() <span class="op">==</span> lab]</span>
+<span id="cb126-19"><a href="#cb126-19" tabindex="-1"></a>    sns.kdeplot(</span>
+<span id="cb126-20"><a href="#cb126-20" tabindex="-1"></a>        vals,</span>
+<span id="cb126-21"><a href="#cb126-21" tabindex="-1"></a>        ax<span class="op">=</span>ax,</span>
+<span id="cb126-22"><a href="#cb126-22" tabindex="-1"></a>        color<span class="op">=</span>col,</span>
+<span id="cb126-23"><a href="#cb126-23" tabindex="-1"></a>        fill<span class="op">=</span><span class="va">False</span>,</span>
+<span id="cb126-24"><a href="#cb126-24" tabindex="-1"></a>        linewidth<span class="op">=</span><span class="fl">1.2</span>,</span>
+<span id="cb126-25"><a href="#cb126-25" tabindex="-1"></a>        label<span class="op">=</span><span class="st">&quot;non-fraud&quot;</span> <span class="cf">if</span> lab <span class="op">==</span> <span class="dv">0</span> <span class="cf">else</span> <span class="st">&quot;fraud&quot;</span>,</span>
+<span id="cb126-26"><a href="#cb126-26" tabindex="-1"></a>    )</span>
+<span id="cb126-27"><a href="#cb126-27" tabindex="-1"></a>    <span class="im">from</span> scipy.stats <span class="im">import</span> gaussian_kde</span>
+<span id="cb126-28"><a href="#cb126-28" tabindex="-1"></a></span>
+<span id="cb126-29"><a href="#cb126-29" tabindex="-1"></a>    grid <span class="op">=</span> np.linspace(<span class="fl">0.0</span>, <span class="fl">1.0</span>, <span class="dv">256</span>)</span>
+<span id="cb126-30"><a href="#cb126-30" tabindex="-1"></a>    dens <span class="op">=</span> gaussian_kde(vals)(grid)</span>
+<span id="cb126-31"><a href="#cb126-31" tabindex="-1"></a>    ax.fill_between(</span>
+<span id="cb126-32"><a href="#cb126-32" tabindex="-1"></a>        grid,</span>
+<span id="cb126-33"><a href="#cb126-33" tabindex="-1"></a>        dens,</span>
+<span id="cb126-34"><a href="#cb126-34" tabindex="-1"></a>        alpha<span class="op">=</span><span class="fl">0.25</span>,</span>
+<span id="cb126-35"><a href="#cb126-35" tabindex="-1"></a>        facecolor<span class="op">=</span><span class="st">&quot;none&quot;</span>,</span>
+<span id="cb126-36"><a href="#cb126-36" tabindex="-1"></a>        edgecolor<span class="op">=</span>col,</span>
+<span id="cb126-37"><a href="#cb126-37" tabindex="-1"></a>        hatch<span class="op">=</span>hatch,</span>
+<span id="cb126-38"><a href="#cb126-38" tabindex="-1"></a>        linewidth<span class="op">=</span><span class="fl">0.0</span>,</span>
+<span id="cb126-39"><a href="#cb126-39" tabindex="-1"></a>    )</span>
+<span id="cb126-40"><a href="#cb126-40" tabindex="-1"></a></span>
+<span id="cb126-41"><a href="#cb126-41" tabindex="-1"></a>ax.set_xlim(<span class="fl">0.0</span>, <span class="fl">1.0</span>)</span></code></pre></div>
 <pre><code>## (0.0, 1.0)</code></pre>
 <div class="sourceCode" id="cb128"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb128-1"><a href="#cb128-1" tabindex="-1"></a>ax.set_xlabel(<span class="st">&quot;horseshoe P(fraud | x) on holdout&quot;</span>)</span>
 <span id="cb128-2"><a href="#cb128-2" tabindex="-1"></a>ax.set_ylabel(<span class="st">&quot;density&quot;</span>)</span>

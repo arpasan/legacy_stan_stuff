@@ -957,9 +957,6 @@ pd.Series(holdout)
 ```
 
 ```{python a21}
-#-#-#-#-#-#-#-
-#- CHUNK #1 #-
-#-#-#-#-#-#-#-
 # One chart, USER_RULES notebook aesthetics (this project only): hatched KDEs
 # of holdout predictive scores under the horseshoe model, by true label.
 
