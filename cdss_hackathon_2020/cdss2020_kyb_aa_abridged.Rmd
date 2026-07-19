@@ -1,7 +1,7 @@
 ---
 title: "CDSS Hackathon 2020"
 author: "Korina Y. Baraceros & Andrej Arpáš"
-output: 
+output:
   html_document:
     toc: true
     toc_float: true
@@ -9,466 +9,349 @@ output:
     fig_caption: true
     theme: spacelab
     code_folding: show
+subtitle: "DK & SE — Time Series on Covid-19 Data Using Stan"
 ---
 
-<style type="text/css">
-.main-container {
-  max-width: 1600px;
-  margin-left: auto;
-  margin-right: auto;
-}
-</style>
-
-
 ```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  comment = NA,
+  fig.align = "center",
+  dpi = 120
+)
 
-knitr::opts_chunk$set(echo = TRUE)
-require(tidyverse)
-require(naniar)
-# library(plyr)  # legacy; avoid masking dplyr
-require(lubridate)
-require(gridExtra)
-require(scales)
-require(rstanarm)
-#require(brms)
+library(tidyverse)
+library(naniar)
+library(lubridate)
+library(gridExtra)
+library(rstanarm)
+library(bayesplot)
 
 options(scipen = 9999)
+options(mc.cores = max(1L, parallel::detectCores() - 1L))
+set.seed(42)
+color_scheme_set("teal")
 
+col_dnk <- "#14b1ab"
+col_swe <- "#f0a500"
+col_close <- "#de4463"
 ```
-
 
 ## Background
 
 How has COVID-19 affected mobility of people and goods across the globe?
 
-We are interested in the pandemic's effects on society. The dataset discusses how goods have moved and how people have travelled given all these different restrictions. 
+We are interested in the pandemic's effects on society. With so many different and disparate approaches, it is difficult to see what measures correlated with what behavior. We decided to compare two regions, similar in geographic location, population size, culture, and history: **Sweden** and **Denmark**. Their mobility behavior and COVID-19 statistics are reflected in Google Community Mobility Reports and ECDC case/death series (see `data/README.md`).
 
-We have seen how different measures from country to country, state to state, district to district have altered the free movement of people and goods. The presumptive goal of every single measure was to lower the confirmed cases and deaths in the given region that are due to the virus. With so many different and disparate approaches, it's difficult to see what measures correlated with what behavior.  We decided to compare two regions, similar in geographic location, population size, culture, and history:  __Sweden__ and __Denmark__.  Their mobility behavior and COVID-19 statistics are reflected in the two data sets: `covid19_ecdc.covid_19_geographic_distribution_worldwide` and `covid19_google_mobility.mobility_report`. 
+We chose these regions because the approach to mitigating the effects of COVID-19 in terms of mobility and the resultant economic and health implications were considerably different. While both effectively closed their borders, mobility was severely curtailed in Denmark (lockdown) whereas Sweden only issued recommendations (non-mandatory). These are contrasting responses for geographies that are physically connected and whose populations are virtually homogeneous to each other.
 
-We chose these regions because the approach to mitigating the effects of COVID-19 in terms of mobility and the resultant economic and health implications were considerably different. While both effectively closed their borders, mobility was severely curtailed in Denmark (lockdown) whereas Sweden only issued recommendations (non-mandatory). These are contrasting responses for geographies that are physically connected and whose populations are virtually homogeneous to each other. 
+An important consideration for these datasets is to treat time itself as a variable. Here we consider time in terms of **before-and-after** border closures, and we employ a before-and-after modeling technique called **difference-in-differences** (pretest-posttest with comparison group). For this to be a valid method, we assume parallel trends — reflected in our choice of Sweden and Denmark.
 
-An important consideration for these datasets is to treat time itself as a variable. There are many ways to treat time, and in this analysis we considered time in terms of __before-and-after__. Moreover, incorporating time gives us causal leverage. We want to see how behavior changed after some particular event takes place. We explored how COVID-19 influenced mobility instrumentally through border closures. And specifically, we considered COVID-19 metrics (cases and deaths per million) before and after border closures - since this was a measure taken by most countries and severely restricted mobility of people and goods across the globe.  We employ a before-and-after modeling technique in time series analysis called __difference-in-differences__, or a pretest-posttest with comparison group.  For this to be a valid method, all we must assume is the equal change or parallel trends - reflected in our choice of Sweden and Denmark.  
+To incorporate uncertainty we use Bayesian modeling via Stan in R (`rstanarm::stan_glm`), which gives a posterior distribution for our estimates rather than single point estimates.
 
-Lastly, in order to incorporate uncertainty, we performed Bayesian modeling calling Stan in R.  This gives us a posterior distribution for our estimates, rather than single point estimates, and credibility intervals that allows us to make a probability statement about our estimates given the observed data.  
+```{r load-clean}
+mobility_raw <- read_csv("data/google_mobility_swe_den.csv", show_col_types = FALSE)
+covid_raw <- read_csv("data/covid19_ecdc.csv", show_col_types = FALSE)
 
+covid19 <- covid_raw |>
+  filter(countries_and_territories %in% c("Sweden", "Denmark"), year == 2020) |>
+  arrange(date) |>
+  transmute(
+    country = countries_and_territories,
+    date,
+    daily_deaths,
+    daily_confirmed_cases,
+    deaths,
+    pop = pop_data_2019,
+    daily_deaths_per_mil = 1e6 * daily_deaths / pop_data_2019,
+    daily_confirmed_cases_per_mil = 1e6 * daily_confirmed_cases / pop_data_2019,
+    deaths_per_mil = 1e6 * deaths / pop_data_2019
+  )
 
-```{r 1a load data, warning = F, message = F, echo = TRUE}
+mobility_region <- mobility_raw |>
+  filter(country_region %in% c("Sweden", "Denmark")) |>
+  transmute(
+    country = country_region,
+    region = sub_region_1,
+    date,
+    retail_rec = retail_and_recreation_percent_change_from_baseline,
+    grocery_pharm = grocery_and_pharmacy_percent_change_from_baseline,
+    parks = parks_percent_change_from_baseline,
+    transit = transit_stations_percent_change_from_baseline,
+    workplace = workplaces_percent_change_from_baseline,
+    residential = residential_percent_change_from_baseline
+  ) |>
+  mutate(
+    yr_month = format(as.Date(date), "%Y-%m"),
+    week = week(ymd(date))
+  )
 
-mobility <- read_csv('data/google_mobility_swe_den.csv') # google mobility data
-covid19 <- read_csv('data/covid19_ecdc.csv') # google covid data
+# Country-day mobility means (avoid broadcasting country COVID onto every region).
+mobility_cd <- mobility_region |>
+  group_by(country, date, yr_month, week) |>
+  summarise(
+    across(
+      c(retail_rec, grocery_pharm, parks, transit, workplace, residential),
+      ~ mean(.x, na.rm = TRUE)
+    ),
+    .groups = "drop"
+  )
 
-# format covid data
-covid19 <- covid19 %>% filter(countries_and_territories %in% c('Sweden', 'Denmark'), year == '2020') %>% arrange(date) %>% select(countries_and_territories, date, daily_deaths, daily_confirmed_cases, deaths)
-colnames(covid19)[1] <- "country"
+panel <- mobility_cd |>
+  left_join(covid19, by = c("country", "date")) |>
+  mutate(
+    # Shared post period: after Sweden's non-EU border cutoff (DK closed Mar 14; SE Mar 19).
+    closed = as.integer(date > as.Date("2020-03-19")),
+    country = factor(country, levels = c("Denmark", "Sweden"))
+  )
 
-# normalize data into per million to make metrics comparable
-covid19$deaths_per_mil <- ifelse(covid19$country == 'Denmark', covid19$deaths / 5.806081, NA)
-covid19$deaths_per_mil <- ifelse(covid19$country == 'Sweden', covid19$deaths / 10.230185, covid19$deaths_per_mil)
-covid19$daily_deaths_per_mil <- ifelse(covid19$country == 'Denmark', covid19$daily_deaths / 5.806081, NA)
-covid19$daily_deaths_per_mil <- ifelse(covid19$country == 'Sweden', covid19$daily_deaths / 10.230185, covid19$daily_deaths_per_mil)
-covid19$daily_confirmed_cases_per_mil <- ifelse(covid19$country == 'Denmark', covid19$daily_confirmed_cases / 5.806081, NA)
-covid19$daily_confirmed_cases_per_mil <- ifelse(covid19$country == 'Sweden', covid19$daily_confirmed_cases / 10.230185, covid19$daily_confirmed_cases_per_mil)
-covid19 <- covid19[, c(1, 2, 3, 4, 5, 7, 8, 6)]
-
-# sort out global mobility dates
-mobility$yr_month <- format(as.Date(mobility$date), "%Y-%m")
-mobility$month <- format(as.Date(mobility$date), "%m")
-mobility$day_num <- format(as.Date(mobility$date), "%d")
-mobility$week_day <- strftime(mobility$date,'%a')
-mobility$week_day <- ordered(mobility$week_day, levels = c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))
-mobility$week <-  week(ymd(mobility$date))
-
-# choose only 2 very similar nordic countries
-mobility <- mobility %>% filter(country_region %in% c('Sweden', 'Denmark'))
-
-# drop useless columns
-mobility <- mobility %>% select(-country_region_code, -sub_region_2, -iso_3166_2_code, -census_fips_code)
-
-# rename cols
-colnames(mobility) <- c('country', 'region', 'date', 'retail_rec', 'grocery_pharm', 'parks', 'transit', 'workplace', 'residential', colnames(mobility)[10:14])
-
-# join with covid data
-mobility <- left_join(mobility, covid19, by = c('country', 'date'))
-
+tibble(
+  n_region_day = nrow(mobility_region),
+  n_country_day = nrow(panel),
+  date_min = min(panel$date),
+  date_max = max(panel$date)
+)
 ```
 
+Time series models are sensitive to missingness, so check the country-day panel.
 
-Time series  models are very sensitive to missingness so check our data for missing measurements. 
-
-
-```{r 1b missingnes, warning = F, message = F, fig.align = 'center', fig.height = 10, fig.width = 12}
-
-# visualize NAs
-vis_miss(mobility, warn_large_data =  F)
-
+```{r missingness, fig.height=6, fig.width=9}
+vis_miss(panel, warn_large_data = FALSE)
 ```
 
-The data seems to have been collected sparsely for some variables on some days, so we will aggregate into weeks and months. The jitter from day to day is likeley to be too granular for this model anyway.  
+The data are sparse on some days for some mobility series, so exploratory charts below aggregate to weeks (and one monthly mobility panel). Day-to-day jitter is likely too granular for the DiD story anyway.
 
-<br>
+## Data exploration
 
-## Data Exploration
+### After border closures
 
+Denmark closed its border on **March 14, 2020**. Sweden closed its borders to non-EU member states on **March 19, 2020**, and virtually all EU countries imposed travel restrictions at about the same time, effectively prohibiting travel into Sweden. Both are closed within a week of each other; we treat **2020-03-19** as the shared post-period cutoff.
 
-### After Border Closures
+### Change in mobility
 
-Recall, Denmark closed its border on __March 14, 2020__.  Meanwhile, Sweden closes its borders to non-EU member states on __March 19, 2020__, and virtually all EU countries imposed travel restrictions at about the same time effectively prohibiting all travel into Sweden. The result is equivalent to a closed border. Both are closed within a week of each other, and we treat these as roughly equivalent for our analysis purposes. 
+```{r eda-mobility-week, fig.height=12, fig.width=10}
+mob_week <- panel |>
+  group_by(country, week) |>
+  summarise(
+    across(
+      c(retail_rec, grocery_pharm, transit, workplace, residential),
+      ~ mean(.x, na.rm = TRUE)
+    ),
+    .groups = "drop"
+  ) |>
+  pivot_longer(
+    cols = -c(country, week),
+    names_to = "series",
+    values_to = "mean"
+  ) |>
+  mutate(
+    series = recode(
+      series,
+      retail_rec = "Retail",
+      grocery_pharm = "Grocery & Pharmacy",
+      transit = "Transit",
+      workplace = "Workplace",
+      residential = "Residential"
+    )
+  )
 
-<br>
-
-#### Change in Mobility
-
-<br>
-<br>
-<center>
-__Changes in Mobility Over Time by Month__
-</center>
-
-```{r 1c recode, include = TRUE}
-
-# collapse to aggregated data at the country level and monthly
-swe <- mobility %>% filter(country == 'Sweden') %>% group_by(yr_month) %>% summarise(mean = mean(retail_rec, na.rm = TRUE), sd = sd(retail_rec, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Sweden')#; swe
-dnk <- mobility %>% filter(country == 'Denmark') %>% group_by(yr_month) %>% summarise(mean = mean(retail_rec, na.rm = TRUE), sd = sd(retail_rec, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Denmark')#; dnk
-mobility_wkly_retail_rec <- rbind(swe, dnk)
-
-swe <- mobility %>% filter(country == 'Sweden') %>% group_by(yr_month) %>% summarise(mean = mean(grocery_pharm, na.rm = TRUE), sd = sd(grocery_pharm, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Sweden')#; swe
-dnk <- mobility %>% filter(country == 'Denmark') %>% group_by(yr_month) %>% summarise(mean = mean(grocery_pharm, na.rm = TRUE), sd = sd(grocery_pharm, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Denmark')#; dnk
-mobility_wkly_grocery_pharm <- rbind(swe, dnk)
-
-swe <- mobility %>% filter(country == 'Sweden') %>% group_by(yr_month) %>% summarise(mean = mean(transit, na.rm = TRUE), sd = sd(transit, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Sweden')#; swe
-dnk <- mobility %>% filter(country == 'Denmark') %>% group_by(yr_month) %>% summarise(mean = mean(transit, na.rm = TRUE), sd = sd(transit, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Denmark')#; dnk
-mobility_wkly_transit <- rbind(swe, dnk)
-
-swe <- mobility %>% filter(country == 'Sweden') %>% group_by(yr_month) %>% summarise(mean = mean(workplace, na.rm = TRUE), sd = sd(workplace, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Sweden')#; swe
-dnk <- mobility %>% filter(country == 'Denmark') %>% group_by(yr_month) %>% summarise(mean = mean(workplace, na.rm = TRUE), sd = sd(workplace, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Denmark')#; dnk
-mobility_wkly_workplace <- rbind(swe, dnk)
-
-swe <- mobility %>% filter(country == 'Sweden') %>% group_by(yr_month) %>% summarise(mean = mean(residential, na.rm = TRUE), sd = sd(residential, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Sweden')#; swe
-dnk <- mobility %>% filter(country == 'Denmark') %>% group_by(yr_month) %>% summarise(mean = mean(residential, na.rm = TRUE), sd = sd(residential, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Denmark')#; dnk
-mobility_wkly_residential <- rbind(swe, dnk)
-
+ggplot(mob_week, aes(week, mean, colour = country, group = country)) +
+  geom_point(size = 1.2) +
+  geom_line(linewidth = 0.6) +
+  geom_vline(xintercept = 12, linetype = "dotted", colour = col_close, linewidth = 0.85) +
+  facet_wrap(~series, ncol = 1, scales = "free_y") +
+  scale_color_manual(values = c(Denmark = col_dnk, Sweden = col_swe)) +
+  labs(
+    title = "Changes in mobility over time by week",
+    x = "Week",
+    y = "% change from baseline",
+    colour = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom")
 ```
 
-```{r 1d chart, warning = F, message = F, fig.align = 'center', fig.height = 14, fig.width = 14, echo = TRUE}
+### Change in COVID metrics
 
-# monthly
-a <- ggplot(mobility_wkly_retail_rec, aes(yr_month, mean, colour = country, group = country)) + 
-     geom_point() + geom_line() + xlab("Month")+ ylab("% Change") + geom_vline(xintercept = 2.3, linetype="dotted", color = "#de4463", size = .85) + 
-     theme_minimal() + scale_color_manual(values = c("#14b1ab", "#f0a500")) + ggtitle("Retail") 
-b <- ggplot(mobility_wkly_grocery_pharm, aes(yr_month, mean, colour = country, group = country)) + 
-     geom_point() + geom_line() + xlab("Month")+ ylab("% Change") + geom_vline(xintercept = 2.3, linetype="dotted", color = "#de4463", size = .85) + 
-     theme_minimal() + scale_color_manual(values = c("#14b1ab", "#f0a500")) + ggtitle("Grocery & Pharmacy") 
-c <- ggplot(mobility_wkly_transit, aes(yr_month, mean, colour = country, group = country)) + 
-     geom_point() + geom_line() + xlab("Month")+ ylab("% Change") + geom_vline(xintercept = 2.3, linetype="dotted", color = "#de4463", size = .85) +
-     theme_minimal() + scale_color_manual(values = c("#14b1ab", "#f0a500")) + ggtitle("Transit")
-d <- ggplot(mobility_wkly_workplace, aes(yr_month, mean, colour = country, group = country)) + 
-     geom_point() + geom_line() + xlab("Month")+ ylab("% Change") + geom_vline(xintercept = 2.3, linetype="dotted", color = "#de4463", size = .85) +
-     theme_minimal() + scale_color_manual(values = c("#14b1ab", "#f0a500")) + ggtitle("Workplace")
-e <- ggplot(mobility_wkly_residential, aes(yr_month, mean, colour = country, group = country)) + 
-     geom_point() + geom_line() + xlab("Month")+ ylab("% Change") + geom_vline(xintercept = 2.3, linetype="dotted", color = "#de4463", size = .85) +
-     theme_minimal() + scale_color_manual(values = c("#14b1ab", "#f0a500")) + ggtitle("Residential")
+```{r eda-covid-week, fig.height=8, fig.width=10}
+covid_week <- panel |>
+  group_by(country, week) |>
+  summarise(
+    daily_confirmed_cases_per_mil = mean(daily_confirmed_cases_per_mil, na.rm = TRUE),
+    daily_deaths_per_mil = mean(daily_deaths_per_mil, na.rm = TRUE),
+    deaths_per_mil = mean(deaths_per_mil, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  pivot_longer(
+    cols = -c(country, week),
+    names_to = "series",
+    values_to = "mean"
+  ) |>
+  mutate(
+    series = recode(
+      series,
+      daily_confirmed_cases_per_mil = "Daily confirmed cases per million",
+      daily_deaths_per_mil = "Daily deaths per million",
+      deaths_per_mil = "Cumulative deaths per million"
+    )
+  )
 
-grid.arrange(a, b, c, d, e, nrow = 5)
-
+ggplot(covid_week, aes(week, mean, colour = country, group = country)) +
+  geom_point(size = 1.2) +
+  geom_line(linewidth = 0.6) +
+  geom_vline(xintercept = 12, linetype = "dotted", colour = col_close, linewidth = 0.85) +
+  facet_wrap(~series, ncol = 1, scales = "free_y") +
+  scale_color_manual(values = c(Denmark = col_dnk, Sweden = col_swe)) +
+  labs(
+    title = "Weekly averages of COVID-19 statistics",
+    x = "Week",
+    y = NULL,
+    colour = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom")
 ```
 
-```{r ex1, warning = F, message = F, fig.align = 'center', fig.height = 14, fig.width = 14}
-grid.arrange(a, b, c, d, e, nrow = 5)
+## Difference in differences
+
+**What is the effect of a mobility-related policy on COVID-related metrics?**
+
+A difference-in-differences model compares COVID metrics before-and-after border closure for Sweden to the before-and-after for Denmark. For two countries that can be considered quite easily the same country, we would expect the closure of borders to have comparable effects on COVID metrics under parallel trends. The DiD interaction `closed:countrySweden` is the quantity of interest.
+
+### In conditional mean terms
+
+```{r did-means}
+did_means <- function(y) {
+  panel |>
+    filter(!is.na(.data[[y]])) |>
+    group_by(country, closed) |>
+    summarise(mean = mean(.data[[y]], na.rm = TRUE), .groups = "drop") |>
+    mutate(outcome = y)
+}
+
+means_cases <- did_means("daily_confirmed_cases_per_mil")
+means_deaths <- did_means("daily_deaths_per_mil")
+
+cell <- function(tbl, ctry, cl) {
+  tbl$mean[tbl$country == ctry & tbl$closed == cl]
+}
+
+delta <- function(tbl, ctry) cell(tbl, ctry, 1L) - cell(tbl, ctry, 0L)
+
+tibble(
+  outcome = c("daily_confirmed_cases_per_mil", "daily_deaths_per_mil"),
+  sweden_before_after = c(delta(means_cases, "Sweden"), delta(means_deaths, "Sweden")),
+  denmark_before_after = c(delta(means_cases, "Denmark"), delta(means_deaths, "Denmark")),
+  naive_did = c(
+    delta(means_cases, "Sweden") - delta(means_cases, "Denmark"),
+    delta(means_deaths, "Sweden") - delta(means_deaths, "Denmark")
+  )
+)
 ```
 
-<br>
-<br>
-<center>
-__Changes in Mobility Over Time by Week__
-</center>
+Observing only differences in means of daily confirmed cases per million, Sweden's before→after change exceeds Denmark's by the naive DiD above (same construction for daily deaths per million).
 
-```{r 1e recode, include = TRUE}
+### In regression terms
 
-# collapse to aggregated data at the country level and weekly
-swe <- mobility %>% filter(country == 'Sweden') %>% group_by(week) %>% summarise(mean = mean(retail_rec, na.rm = TRUE), sd = sd(retail_rec, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Sweden')#; swe
-dnk <- mobility %>% filter(country == 'Denmark') %>% group_by(week) %>% summarise(mean = mean(retail_rec, na.rm = TRUE), sd = sd(retail_rec, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Denmark')#; dnk
-mobility_wkly_retail_rec <- rbind(swe, dnk)
+Primary specification on the country-day panel:
 
-swe <- mobility %>% filter(country == 'Sweden') %>% group_by(week) %>% summarise(mean = mean(grocery_pharm, na.rm = TRUE), sd = sd(grocery_pharm, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Sweden')#; swe
-dnk <- mobility %>% filter(country == 'Denmark') %>% group_by(week) %>% summarise(mean = mean(grocery_pharm, na.rm = TRUE), sd = sd(grocery_pharm, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Denmark')#; dnk
-mobility_wkly_grocery_pharm <- rbind(swe, dnk)
+\[
+y_{ct} = \alpha + \beta_1\,\mathrm{closed}_t + \beta_2\,\mathrm{Sweden}_c + \beta_3\,(\mathrm{closed}_t\times\mathrm{Sweden}_c) + \varepsilon_{ct}.
+\]
 
-swe <- mobility %>% filter(country == 'Sweden') %>% group_by(week) %>% summarise(mean = mean(transit, na.rm = TRUE), sd = sd(transit, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Sweden')#; swe
-dnk <- mobility %>% filter(country == 'Denmark') %>% group_by(week) %>% summarise(mean = mean(transit, na.rm = TRUE), sd = sd(transit, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Denmark')#; dnk
-mobility_wkly_transit <- rbind(swe, dnk)
+$\beta_3$ is the DiD estimate. A second model adds retail and grocery/pharmacy mobility as covariates.
 
-swe <- mobility %>% filter(country == 'Sweden') %>% group_by(week) %>% summarise(mean = mean(workplace, na.rm = TRUE), sd = sd(workplace, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Sweden')#; swe
-dnk <- mobility %>% filter(country == 'Denmark') %>% group_by(week) %>% summarise(mean = mean(workplace, na.rm = TRUE), sd = sd(workplace, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Denmark')#; dnk
-mobility_wkly_workplace <- rbind(swe, dnk)
+```{r did-cases, results='hide'}
+reg_cases <- stan_glm(
+  daily_confirmed_cases_per_mil ~ closed * country,
+  data = panel,
+  family = gaussian(),
+  seed = 42,
+  refresh = 0
+)
 
-swe <- mobility %>% filter(country == 'Sweden') %>% group_by(week) %>% summarise(mean = mean(residential, na.rm = TRUE), sd = sd(residential, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Sweden')#; swe
-dnk <- mobility %>% filter(country == 'Denmark') %>% group_by(week) %>% summarise(mean = mean(residential, na.rm = TRUE), sd = sd(residential, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Denmark')#; dnk
-mobility_wkly_residential <- rbind(swe, dnk)
-
+reg_cases_mob <- stan_glm(
+  daily_confirmed_cases_per_mil ~ closed * country + retail_rec * grocery_pharm,
+  data = panel,
+  family = gaussian(),
+  seed = 42,
+  refresh = 0
+)
 ```
 
-```{r 1f chart, warning = F, message = F, fig.align = 'center', fig.height = 15, fig.width = 12, echo = TRUE}
+```{r did-cases-summary}
+print(reg_cases, digits = 3)
+print(reg_cases_mob, digits = 3)
 
-# weekly
-f <- ggplot(mobility_wkly_retail_rec, aes(week, mean, colour = country, group = country)) + 
-     geom_point() + geom_line() + xlab("Week")+ ylab("% Change") + geom_vline(xintercept = 11, linetype="dotted", color = "#de4463", size = .85) + 
-     theme_minimal() + scale_color_manual(values = c("#14b1ab", "#f0a500")) + ggtitle("Retail") 
-g <- ggplot(mobility_wkly_grocery_pharm, aes(week, mean, colour = country, group = country)) + 
-     geom_point() + geom_line() + xlab("Week")+ ylab("% Change") + geom_vline(xintercept = 11, linetype="dotted", color = "#de4463", size = .85) + 
-     theme_minimal() + scale_color_manual(values = c("#14b1ab", "#f0a500")) + ggtitle("Grocery & Pharmacy") 
-h <- ggplot(mobility_wkly_transit, aes(week, mean, colour = country, group = country)) + 
-     geom_point() + geom_line() + xlab("Week")+ ylab("% Change") + geom_vline(xintercept = 11, linetype="dotted", color = "#de4463", size = .85) + 
-     theme_minimal() + scale_color_manual(values = c("#14b1ab", "#f0a500")) + ggtitle("Transit")
-i <- ggplot(mobility_wkly_workplace, aes(week, mean, colour = country, group = country)) + 
-     geom_point() + geom_line() + xlab("Week")+ ylab("% Change") + geom_vline(xintercept = 11, linetype="dotted", color = "#de4463", size = .85) + 
-     theme_minimal() + scale_color_manual(values = c("#14b1ab", "#f0a500")) + ggtitle("Workplace")
-j <- ggplot(mobility_wkly_residential, aes(week, mean, colour = country, group = country)) + 
-     geom_point() + geom_line() + xlab("Week")+ ylab("% Change") + geom_vline(xintercept = 11, linetype="dotted", color = "#de4463", size = .85) + 
-     theme_minimal() + scale_color_manual(values = c("#14b1ab", "#f0a500")) + ggtitle("Residential")
+diag_cases <- tibble(
+  model = c("DiD", "DiD + mobility"),
+  max_rhat = c(max(rhat(reg_cases), na.rm = TRUE), max(rhat(reg_cases_mob), na.rm = TRUE)),
+  min_neff_ratio = c(
+    min(neff_ratio(reg_cases), na.rm = TRUE),
+    min(neff_ratio(reg_cases_mob), na.rm = TRUE)
+  )
+)
+diag_cases
 
-grid.arrange(f, g, h, i, j, nrow = 5)
-
+posterior_interval(reg_cases, prob = 0.9)
+posterior_interval(reg_cases_mob, prob = 0.9)
 ```
 
-```{r ex2, warning = F, message = F, fig.align = 'center', fig.height = 15, fig.width = 12}
-grid.arrange(f, g, h, i, j, nrow = 5)
+```{r did-cases-ppc, fig.height=3.8}
+pp_check(reg_cases) + ggtitle("PPC: daily cases per million (DiD)")
 ```
 
-<br>
-<br>
+```{r did-deaths, results='hide'}
+reg_deaths <- stan_glm(
+  daily_deaths_per_mil ~ closed * country,
+  data = panel,
+  family = gaussian(),
+  seed = 42,
+  refresh = 0
+)
 
-#### Change in COVID Metrics
-
-<br>
-<center>
-__Monthly Averages of COVID-19 Statistics__
-</center>
-
-```{r 1g recode, warning = F, message = F, echo = TRUE}
-
-# collapse to aggregated data at the country level and monthly
-swe <- mobility %>% filter(country == 'Sweden') %>% group_by(yr_month) %>% summarise(mean = mean(daily_confirmed_cases, na.rm = TRUE), sd = sd(daily_confirmed_cases, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Sweden')#; swe
-dnk <- mobility %>% filter(country == 'Denmark') %>% group_by(yr_month) %>% summarise(mean = mean(daily_confirmed_cases, na.rm = TRUE), sd = sd(daily_confirmed_cases, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Denmark')#; dnk
-mobility_daily_confirmed_cases_m <- rbind(swe, dnk)
-
-swe <- mobility %>% filter(country == 'Sweden') %>% group_by(yr_month) %>% summarise(mean = mean(daily_confirmed_cases_per_mil, na.rm = TRUE), sd = sd(daily_confirmed_cases_per_mil, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Sweden')#; swe
-dnk <- mobility %>% filter(country == 'Denmark') %>% group_by(yr_month) %>% summarise(mean = mean(daily_confirmed_cases_per_mil, na.rm = TRUE), sd = sd(daily_confirmed_cases_per_mil, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Denmark')#; dnk
-mobility_daily_confirmed_cases_per_mil_m <- rbind(swe, dnk)
-
-swe <- mobility %>% filter(country == 'Sweden') %>% group_by(yr_month) %>% summarise(mean = mean(daily_deaths, na.rm = TRUE), sd = sd(daily_deaths, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Sweden')#; swe
-dnk <- mobility %>% filter(country == 'Denmark') %>% group_by(yr_month) %>% summarise(mean = mean(daily_deaths, na.rm = TRUE), sd = sd(daily_deaths, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Denmark')#; dnk
-mobility_daily_deaths_m <- rbind(swe, dnk)
-
-swe <- mobility %>% filter(country == 'Sweden') %>% group_by(yr_month) %>% summarise(mean = mean(daily_deaths_per_mil, na.rm = TRUE), sd = sd(daily_deaths_per_mil, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Sweden')#; swe
-dnk <- mobility %>% filter(country == 'Denmark') %>% group_by(yr_month) %>% summarise(mean = mean(daily_deaths_per_mil, na.rm = TRUE), sd = sd(daily_deaths_per_mil, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Denmark')#; dnk
-mobility_daily_deaths_per_mil_m <- rbind(swe, dnk)
-
-swe <- mobility %>% filter(country == 'Sweden') %>% group_by(yr_month) %>% summarise(mean = mean(deaths_per_mil, na.rm = TRUE), sd = sd(deaths_per_mil, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Sweden')#; swe
-dnk <- mobility %>% filter(country == 'Denmark') %>% group_by(yr_month) %>% summarise(mean = mean(deaths_per_mil, na.rm = TRUE), sd = sd(deaths_per_mil, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Denmark')#; dnk
-mobility_deaths_per_mil_m<- rbind(swe, dnk)
-
+reg_deaths_mob <- stan_glm(
+  daily_deaths_per_mil ~ closed * country + retail_rec * grocery_pharm,
+  data = panel,
+  family = gaussian(),
+  seed = 42,
+  refresh = 0
+)
 ```
 
-```{r 1h chart, warning = F, message = F, fig.align = 'center', fig.height = 10, fig.width = 12, echo = TRUE}
+```{r did-deaths-summary}
+print(reg_deaths, digits = 3)
+print(reg_deaths_mob, digits = 3)
 
-# monthly
-k <- ggplot(mobility_daily_confirmed_cases_m, aes(yr_month, mean, colour = country, group = country)) + 
-     geom_point() + geom_line() + xlab("Month")+ ylab("Avg. Count") + ylim(0, 1000) + geom_vline(xintercept = 2.3, linetype="dotted", color = "#de4463", size = .85) + 
-     theme_minimal() + scale_color_manual(values = c("#14b1ab", "#f0a500")) + ggtitle("Daily  Confirmed Cases") 
-l <- ggplot(mobility_daily_confirmed_cases_per_mil_m, aes(yr_month, mean, colour = country, group = country)) + 
-     geom_point() + geom_line() + xlab("Month")+ ylab("Avg. Count") + ylim(0, 100) + geom_vline(xintercept = 2.3, linetype="dotted", color = "#de4463", size = .85) + 
-     theme_minimal() + scale_color_manual(values = c("#14b1ab", "#f0a500")) + ggtitle("Daily Confirmed Cases per Million") 
-m <- ggplot(mobility_daily_deaths_m, aes(yr_month, mean, colour = country, group = country)) + 
-     geom_point() + geom_line() + xlab("Month")+ ylab("Avg. Count") + geom_vline(xintercept = 2.3, linetype="dotted", color = "#de4463", size = .85) +
-     theme_minimal() + scale_color_manual(values = c("#14b1ab", "#f0a500")) + ggtitle("Daily Deaths")
-n <- ggplot(mobility_daily_deaths_per_mil_m, aes(yr_month, mean, colour = country, group = country)) + 
-     geom_point() + geom_line() + xlab("Month")+ ylab("Avg. Count") + geom_vline(xintercept = 2.3, linetype="dotted", color = "#de4463", size = .85) +
-     theme_minimal() + scale_color_manual(values = c("#14b1ab", "#f0a500")) + ggtitle("Daily Deaths per Million")
-o <- ggplot(mobility_deaths_per_mil_m, aes(yr_month, mean, colour = country, group = country)) + 
-     geom_point() + geom_line() + xlab("Month")+ ylab("Count") + geom_vline(xintercept = 2.3, linetype="dotted", color = "#de4463", size = .85) +
-     theme_minimal() + scale_color_manual(values = c("#14b1ab", "#f0a500")) + ggtitle("Cummulative Count Deaths per Million")
+diag_deaths <- tibble(
+  model = c("DiD", "DiD + mobility"),
+  max_rhat = c(max(rhat(reg_deaths), na.rm = TRUE), max(rhat(reg_deaths_mob), na.rm = TRUE)),
+  min_neff_ratio = c(
+    min(neff_ratio(reg_deaths), na.rm = TRUE),
+    min(neff_ratio(reg_deaths_mob), na.rm = TRUE)
+  )
+)
+diag_deaths
 
-grid.arrange(l, n, o, nrow = 3)
-
+posterior_interval(reg_deaths, prob = 0.9)
+posterior_interval(reg_deaths_mob, prob = 0.9)
 ```
 
-```{r ex3, warning = F, message = F, fig.align = 'center', fig.height = 10, fig.width = 12}
-grid.arrange(l, n, o, nrow = 3)
+```{r did-deaths-ppc, fig.height=3.8}
+pp_check(reg_deaths) + ggtitle("PPC: daily deaths per million (DiD)")
 ```
 
-<br>
-<center>
-__Weekly Averages of COVID-19 Statistics__
-</center>
-
-
-```{r 1i recode, warning = F, message = F, echo = TRUE}
-
-# collapse to aggregated data at the country level and monthly
-swe <- mobility %>% filter(country == 'Sweden') %>% group_by(week) %>% summarise(mean = mean(daily_confirmed_cases, na.rm = TRUE), sd = sd(daily_confirmed_cases, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Sweden')#; swe
-dnk <- mobility %>% filter(country == 'Denmark') %>% group_by(week) %>% summarise(mean = mean(daily_confirmed_cases, na.rm = TRUE), sd = sd(daily_confirmed_cases, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Denmark')#; dnk
-mobility_daily_confirmed_cases_m <- rbind(swe, dnk)
-
-swe <- mobility %>% filter(country == 'Sweden') %>% group_by(week) %>% summarise(mean = mean(daily_confirmed_cases_per_mil, na.rm = TRUE), sd = sd(daily_confirmed_cases_per_mil, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Sweden')#; swe
-dnk <- mobility %>% filter(country == 'Denmark') %>% group_by(week) %>% summarise(mean = mean(daily_confirmed_cases_per_mil, na.rm = TRUE), sd = sd(daily_confirmed_cases_per_mil, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Denmark')#; dnk
-mobility_daily_confirmed_cases_per_mil_m <- rbind(swe, dnk)
-
-swe <- mobility %>% filter(country == 'Sweden') %>% group_by(week) %>% summarise(mean = mean(daily_deaths, na.rm = TRUE), sd = sd(daily_deaths, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Sweden')#; swe
-dnk <- mobility %>% filter(country == 'Denmark') %>% group_by(week) %>% summarise(mean = mean(daily_deaths, na.rm = TRUE), sd = sd(daily_deaths, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Denmark')#; dnk
-mobility_daily_deaths_m <- rbind(swe, dnk)
-
-swe <- mobility %>% filter(country == 'Sweden') %>% group_by(week) %>% summarise(mean = mean(daily_deaths_per_mil, na.rm = TRUE), sd = sd(daily_deaths_per_mil, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Sweden')#; swe
-dnk <- mobility %>% filter(country == 'Denmark') %>% group_by(week) %>% summarise(mean = mean(daily_deaths_per_mil, na.rm = TRUE), sd = sd(daily_deaths_per_mil, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Denmark')#; dnk
-mobility_daily_deaths_per_mil_m <- rbind(swe, dnk)
-
-swe <- mobility %>% filter(country == 'Sweden') %>% group_by(week) %>% summarise(mean = mean(deaths_per_mil, na.rm = TRUE), sd = sd(deaths_per_mil, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Sweden')#; swe
-dnk <- mobility %>% filter(country == 'Denmark') %>% group_by(week) %>% summarise(mean = mean(deaths_per_mil, na.rm = TRUE), sd = sd(deaths_per_mil, na.rm = TRUE), .groups = 'drop') %>% mutate(country = 'Denmark')#; dnk
-mobility_deaths_per_mil_m<- rbind(swe, dnk)
-
+```{r did-interaction-plot, fig.height=3.6}
+mcmc_areas(as.matrix(reg_cases), pars = "closed:countrySweden") +
+  labs(title = "Posterior: DiD interaction (cases per million)")
+mcmc_areas(as.matrix(reg_deaths), pars = "closed:countrySweden") +
+  labs(title = "Posterior: DiD interaction (deaths per million)")
 ```
 
-```{r 1j chart, warning = F, message = F, fig.align = 'center', fig.height = 10, fig.width = 12, echo = TRUE}
+Read the interaction posteriors as Sweden's excess before→after change relative to Denmark, after the shared border-closure cutoff. Mobility covariates in the secondary models absorb some of the time-varying behavior associated with retail/grocery activity; the interaction remains the DiD contrast of interest.
 
-# weekly
-p <- ggplot(mobility_daily_confirmed_cases_m, aes(week, mean, colour = country, group = country)) + 
-     geom_point() + geom_line() + xlab("Week")+ ylab("Avg. Count") + ylim(0, 1000) + geom_vline(xintercept = 12, linetype="dotted", color = "#de4463", size = .85) + 
-     theme_minimal() + scale_color_manual(values = c("#14b1ab", "#f0a500")) + ggtitle("Daily  Confirmed Cases") 
-q <- ggplot(mobility_daily_confirmed_cases_per_mil_m, aes(week, mean, colour = country, group = country)) + 
-     geom_point() + geom_line() + xlab("Week")+ ylab("Avg. Count") + ylim(0, 110) + geom_vline(xintercept = 12, linetype="dotted", color = "#de4463", size = .85) + 
-     theme_minimal() + scale_color_manual(values = c("#14b1ab", "#f0a500")) + ggtitle("Daily Confirmed Cases per Million") 
-r <- ggplot(mobility_daily_deaths_m, aes(week, mean, colour = country, group = country)) + 
-     geom_point() + geom_line() + xlab("Week")+ ylab("Avg. Count") + geom_vline(xintercept = 12, linetype="dotted", color = "#de4463", size = .85) +
-     theme_minimal() + scale_color_manual(values = c("#14b1ab", "#f0a500")) + ggtitle("Daily Deaths")
-s <- ggplot(mobility_daily_deaths_per_mil_m, aes(week, mean, colour = country, group = country)) + 
-     geom_point() + geom_line() + xlab("Week")+ ylab("Avg. Count") + ylim(0, 10) + geom_vline(xintercept = 12, linetype="dotted", color = "#de4463", size = .85) +
-     theme_minimal() + scale_color_manual(values = c("#14b1ab", "#f0a500")) + ggtitle("Daily Deaths per Million")
-t <- ggplot(mobility_deaths_per_mil_m, aes(week, mean, colour = country, group = country)) + 
-     geom_point() + geom_line() + xlab("Week")+ ylab("Count") + geom_vline(xintercept = 12, linetype="dotted", color = "#de4463", size = .85) +
-     theme_minimal() + scale_color_manual(values = c("#14b1ab", "#f0a500")) + ggtitle("Cummulative Count Deaths per Million")
+## Discussion and next steps
 
-grid.arrange(q, s, t, nrow = 3)
-
-```
-
-```{r ex4, warning = F, message = F, fig.align = 'center', fig.height = 10, fig.width = 12}
-grid.arrange(q, s, t, nrow = 3)
-```
-
-<br>
-
-
-## Difference in Differences  
-
-<b><span style="color:#de4463">What is the effect of a mobility related policy on COVID related metrics?</span></b>
-
-A difference in differences model compares COVID related metrics _before-and-after_ border closure for Sweden to the _before-and-after_ border closure for Denmark. For two countries that can be considered quite easily the same country, we would expect the closure of borders to have comparable effects on COVID metrics.  
-
-### In Conditional Mean Terms
-
-Observing only differences in means daily confirmed cases per million between Sweden and Denmark, there is an increase of an additional 32 cases for Sweden as compared to Denmark.  
-
-Country       | Change in Daily Confirmed Cases per Million
---------------| ------------------------ 
-Sweden        | Increase of 4 to 47 daily confirmed cases per million
-Denmark       | Increase of 6 to 17 daily confirmed cases per million
-
-```{r 2a conditional mean terms cases, message = F, warning = F, echo = TRUE}
-
-# before/after border closure indicator
-mobility$closed <- as.numeric(mobility$date > as.Date("2020-03-19"))
-
-#before and after for both groups
-swe_before_dc <- colMeans(subset(mobility, country == "Sweden" & closed == 0, select = daily_confirmed_cases_per_mil))
-den_before_dc <- colMeans(subset(mobility, country == "Denmark" & closed == 0, select = daily_confirmed_cases_per_mil))
-swe_after_dc  <- colMeans(subset(mobility, country == "Sweden" & closed == 1, select = daily_confirmed_cases_per_mil))
-den_after_dc  <- colMeans(subset(mobility, country == "Denmark" & closed == 1, select = daily_confirmed_cases_per_mil))
-
-```
-
-
-Observing only differences in means daily deaths per million between Sweden and Denmark, there is an increase of an additional 2 cases for Sweden as compared to Denmark.  
-
-Country     | Change in Daily Deaths per Million
-------------| ------------------------ 
-Sweden      | Increase from 0 to 3 daily deaths per million
-Denmark     | Increase from 0 to 1 daily deaths per million
-
-```{r 2b conditional mean terms deaths, message = F, warning = F, echo = TRUE}
-
-#before and after for both groups
-swe_before_dpm <- colMeans(subset(mobility, country == "Sweden" & closed == 0, select = daily_deaths_per_mil))
-den_before_dpm <- colMeans(subset(mobility, country == "Denmark" & closed == 0, select = daily_deaths_per_mil))
-swe_after_dpm  <- colMeans(subset(mobility, country == "Sweden" & closed == 1, select = daily_deaths_per_mil))
-den_after_dpm  <- colMeans(subset(mobility, country == "Denmark" & closed == 1, select = daily_deaths_per_mil))
-
-```
-
-## In Regression Terms
-
-### Daily Cases per Million
-```{r 2c daily cases regression, message = F, warning = F, comment = NA, echo = TRUE}
-
-# frequentist
-#reg1 <- lm(daily_confirmed_cases_per_mil ~ factor(closed) + factor(country), data = mobility)
-#summary(reg1)
-
-#reg2 <- lm(daily_confirmed_cases_per_mil ~ factor(closed) + factor(country) + retail_rec*grocery_pharm, data = mobility)
-#summary(reg2)
-
-# but make it Bayesian!!
-reg1 <- stan_glm(daily_confirmed_cases_per_mil ~ factor(closed) + factor(country), data = mobility)
-summary(reg1)
-
-reg2 <- stan_glm(daily_confirmed_cases_per_mil ~ factor(closed) + factor(country) + retail_rec*grocery_pharm, data = mobility)
-summary(reg2)
-
-posterior_interval(reg2, prog = .9, type = 'central', pars = NULL, regex_pars = NULL)
-```
-
-```{r ex5, message = F, warning = F, comment = NA}
-summary(reg1)
-
-summary(reg2)
-
-posterior_interval(reg2, prog = .9, type = 'central', pars = NULL, regex_pars = NULL)
-```
-
-There is an increase of about 32*** daily confirmed cases per million after border closure. In Sweden alone, net of other measures, there was an increase of roughly 23 daily confirmed cases per million. Net of country and other measures, restriction of mobility for retail/recreation _and_ grocery/pharmacy establishments (interaction term) does not appear to decrease the daily confirmed cases per million. Interestingly, restriction on mobility for retail/recreation appears to decrease daily confirmed cases net of other measures, but restricting grocery/pharmacy mobility does not. Both of these measures are close to zero, however. These statistics are all significant at the 99.9% confidence level. The overall model explains only 33% of the variance in the observed confirmed daily cases per million.  
-
-### Daily Deaths per Million
-```{r 2d daily deaths regression, comment = NA, echo = TRUE}
-
-# frequentist
-#reg3 <- lm(daily_deaths_per_mil ~ factor(closed) + factor(country), data = mobility)
-#summary(reg3)
-
-#reg4 <- lm(daily_deaths_per_mil ~ factor(closed) + factor(country) + retail_rec*grocery_pharm, data = mobility)
-#summary(reg4)
-
-# but make it Bayesian!!
-reg3 <- stan_glm(daily_deaths_per_mil ~ factor(closed) + factor(country), data = mobility)
-summary(reg3)
-
-reg4 <- stan_glm(daily_deaths_per_mil ~ factor(closed) + factor(country) + retail_rec*grocery_pharm, data = mobility)
-summary(reg4)
-
-posterior_interval(reg4, prog = .9, type = 'central', pars = NULL, regex_pars = NULL)
-
-```
-
-```{r ex6, message = F, warning = F, comment = NA}
-summary(reg3)
-
-summary(reg4)
-
-posterior_interval(reg4, prog = .9, type = 'central', pars = NULL, regex_pars = NULL)
-```
-
-There is an increase of about 2*** daily deaths per million after border closure. In Sweden alone, net of other measures, there was an increase of roughly 2 daily deaths per million. Net of country and other measures, restriction of mobility for retail/recreation _and_ grocery/pharmacy establishments (interaction term) does not appear to decrease the daily deaths per million. These statistics are all significant at the 99.9$% confidence level. The overall model explains only 33% of the variance in the observed daily deaths per million. 
-
-
-
-## Discussion and Next Steps
-
-Our results confirm that irrespective of mobility curtailment and measures undertaken, from border closures to restaurant shutdowns, both countries' health metrics eventually converged to comparable levels with marginal differences through time, while the difference was predominantly observed in diminished mobility and increased economic disruption. Next up, it would be prudent to examine data pertaining to the characteristics of the deceased and infected. Should additional data confirm what the reportage suggests, i.e. that the majority of the deaths occurred concomitant with underlying health issues, especially vis-a-vis higher age brackets, the rationale for mobility restrictions would face serious credibility problems.
-
+Our results speak to whether, irrespective of mobility curtailment and measures undertaken — from border closures to restaurant shutdowns — both countries' health metrics eventually moved in ways that leave only marginal differences through time, while much of the observed contrast sits in diminished mobility and increased economic disruption. Next up, it would be prudent to examine data pertaining to the characteristics of the deceased and infected. Should additional data confirm what the reportage suggests, i.e. that the majority of the deaths occurred concomitant with underlying health issues, especially in higher age brackets, the rationale for mobility restrictions would face serious credibility problems.
