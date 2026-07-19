@@ -121,17 +121,21 @@ Time series models are sensitive to missingness, so check the region-day join (b
 mobility_vis <- mobility_region |>
   left_join(covid19, by = c("country", "date"))
 
-# Keep column order; put labels underneath with room so long names are not clipped.
+# Your vis_miss on the region-day join; column order kept; labels under the plot with margin so long names are not clipped.
 p_miss <- vis_miss(mobility_vis, warn_large_data = FALSE)
-x_levels <- levels(p_miss$data$variable)
+x_labs <- miss_var_summary(mobility_vis) |>
+  mutate(lab = paste0(variable, " (", round(as.numeric(pct_miss), 1), "%)")) |>
+  arrange(match(variable, names(mobility_vis))) |>
+  pull(lab)
+names(x_labs) <- names(mobility_vis)
 p_miss +
-  scale_x_discrete(limits = x_levels, position = "bottom") +
+  scale_x_discrete(limits = names(mobility_vis), labels = x_labs, position = "bottom") +
   theme(
     axis.text.x = element_text(angle = 55, hjust = 1, vjust = 1, size = 8.5),
-    plot.margin = unit(c(0.5, 1.0, 4.0, 0.5), "cm")
+    legend.position = "top",
+    plot.margin = unit(c(0.5, 1.2, 4.2, 0.5), "cm")
   )
 ```
-
 The data seems to have been collected sparsely for some variables on some days, so we will aggregate into weeks for the charts below, and the DiD models use the country-day panel. The jitter from day to day is likely too granular for this model anyway.
 
 ## Data exploration
