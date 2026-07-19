@@ -115,13 +115,30 @@ tibble(
 )
 ```
 
-Time series models are sensitive to missingness, so check the country-day panel.
+Time series models are sensitive to missingness. On the raw **region-day** mobility extract, several series have gaps; after collapsing to **country-day** means and joining ECDC, the modeling panel is complete (so a `vis_miss` heatmap would just be a solid “present” block — useless). Compare the two grains:
 
-```{r missingness, fig.height=6, fig.width=9}
-vis_miss(panel, warn_large_data = FALSE)
+```{r missingness}
+miss_region <- miss_var_summary(mobility_region) |>
+  filter(n_miss > 0) |>
+  arrange(desc(pct_miss))
+
+miss_panel <- miss_var_summary(panel) |>
+  arrange(desc(pct_miss))
+
+knitr::kable(
+  miss_region,
+  digits = 2,
+  caption = "Variables with any missingness in region-day mobility (before country-day collapse)"
+)
+
+knitr::kable(
+  miss_panel,
+  digits = 2,
+  caption = "Missingness in the country-day modeling panel (should be all zeros)"
+)
 ```
 
-The data are sparse on some days for some mobility series, so exploratory charts below aggregate to weeks (and one monthly mobility panel). Day-to-day jitter is likely too granular for the DiD story anyway.
+Day-to-day jitter is still noisy for the narrative charts, so the exploratory plots below aggregate to weeks.
 
 ## Data exploration
 
