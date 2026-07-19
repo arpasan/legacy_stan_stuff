@@ -33,7 +33,7 @@ rm(list = ls()) # clean glob. computing environment
 # gc() # garbage collect
 ```
 
-We fetch the dataset from [here](https://github.com/CapitalOneRecruiting/DS). This remaster ships a **20,000-row** extract (`data/transactions_sample.jsonl`) so the notebook is reproducible from the repo; drop the full `transactions.txt` into `data/` to rerun on the complete Capital One dump.
+We fetch the dataset from [here](https://github.com/CapitalOneRecruiting/DS). This notebook uses a **20,000-row** extract (`data/transactions_sample.jsonl`) so the analysis is reproducible from the repo; drop the full `transactions.txt` into `data/` to rerun on the complete Capital One dump.
 
 ```{python a0}
 import pandas as pd
@@ -758,7 +758,7 @@ round(
 )
 ```
 
-Now, leave-one-out predictive probabilities via `rstanarm::loo_predict` (wrapper around `E_loo` that avoids the Inf/NA/constant-tail GPD failures from calling `E_loo` on the raw epred matrix with `-log_lik`).
+Leave-one-out predictive probabilities via `rstanarm::loo_predict` (PSIS-LOO mean predictions):
 
 ```{r 5u}
 ploo <- loo_predict(
@@ -809,9 +809,7 @@ ggplot(calPlotData, auto.key = list(columns = 2)) +
 
 ## Model 3: Horseshoe logistic via CmdStanPy
 
-<em>Revision 2026-07-18c — Model 3 chart source cleaned to match this document’s style.</em>
-
-One more Bayesian attempt — not a model zoo. Model 1’s sklearn $\ell_2$ logit is the bar to clear (**70.48%** holdout accuracy on this balanced extract). Model 2’s flat `stan_glm` logit is more honest about uncertainty but lands nearer 60% under LOO. Here we stay fully Bayesian and try to beat Model 1 on the **same frame and split**.
+Model 1’s sklearn $\ell_2$ logit reaches **70.48%** holdout accuracy on this balanced extract. Model 2’s flat `stan_glm` logit reports fuller uncertainty but lands nearer 60% under LOO. Model 3 stays Bayesian and targets stronger holdout performance on the **same frame and split**.
 
 The model is a **horseshoe-prior logistic regression** in CmdStanPy (`stan/horseshoe_logit.stan`): global–local shrinkage on coefficients (Carvalho et al.), fit by HMC. Features keep the Model 1 numerics / flags, but replace one-hot account and customer IDs with **train-only smoothed group fraud rates** (empirical-Bayes / target encoding with Laplace smoothing; unseen test IDs fall back to the training base rate). That is partial pooling in feature space rather than a giant sparse dummy design.
 
@@ -1015,5 +1013,5 @@ plt.tight_layout()
 plt.show()
 ```
 
-Same 20% holdout as Model 1: holdout accuracy moves from **70.48%** (sklearn $\ell_2$ logit) to **~71.4%** under the horseshoe posterior mean, with a better Brier score as well. GPyTorch variational GPs were tried on this extract and did not clear the Model 1 bar, so the shipped attempt is this single CmdStanPy horseshoe logit — one Bayesian model, one predictive chart, no foil stack.
+On the same 20% holdout as Model 1, the horseshoe posterior mean reaches **~71.4%** accuracy (vs. **70.48%** for the sklearn $\ell_2$ logit), with a modestly better Brier score. The chart above shows holdout score separation under that predictive distribution.
 
