@@ -117,16 +117,18 @@ tibble(
 
 Time series models are sensitive to missingness, so check the region-day join (before the country-day collapse used in the DiD).
 
-```{r missingness, fig.height=10, fig.width=13}
+```{r missingness, fig.height=11, fig.width=13}
 mobility_vis <- mobility_region |>
   left_join(covid19, by = c("country", "date"))
 
-# Labels at the bottom (naniar defaults to top, which clips long names in HTML).
-vis_miss(mobility_vis, warn_large_data = FALSE) +
-  scale_x_discrete(position = "bottom") +
+# Keep column order; put labels underneath with room so long names are not clipped.
+p_miss <- vis_miss(mobility_vis, warn_large_data = FALSE)
+x_levels <- levels(p_miss$data$variable)
+p_miss +
+  scale_x_discrete(limits = x_levels, position = "bottom") +
   theme(
     axis.text.x = element_text(angle = 55, hjust = 1, vjust = 1, size = 8.5),
-    plot.margin = unit(c(0.6, 0.8, 2.8, 0.5), "cm")
+    plot.margin = unit(c(0.5, 1.0, 4.0, 0.5), "cm")
   )
 ```
 
