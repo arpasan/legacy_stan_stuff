@@ -117,14 +117,15 @@ tibble(
 
 Time series models are sensitive to missingness, so check the region-day join (before the country-day collapse used in the DiD).
 
-```{r missingness, fig.height=8, fig.width=12}
+```{r missingness, fig.height=9, fig.width=12}
 mobility_vis <- mobility_region |>
   left_join(covid19, by = c("country", "date"))
 
 vis_miss(mobility_vis, warn_large_data = FALSE) +
+  coord_cartesian(clip = "off") +
   theme(
     axis.text.x = element_text(angle = 55, hjust = 1, vjust = 1, size = 9),
-    plot.margin = margin(18, 24, 12, 12)
+    plot.margin = margin(t = 90, r = 28, b = 16, l = 16)
   )
 ```
 
