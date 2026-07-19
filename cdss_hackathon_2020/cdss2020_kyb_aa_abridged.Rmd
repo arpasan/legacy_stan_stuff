@@ -121,11 +121,12 @@ Time series models are sensitive to missingness, so check the region-day join (b
 mobility_vis <- mobility_region |>
   left_join(covid19, by = c("country", "date"))
 
+# Labels at the bottom (naniar defaults to top, which clips long names in HTML).
 vis_miss(mobility_vis, warn_large_data = FALSE) +
-  coord_cartesian(clip = "off") +
+  scale_x_discrete(position = "bottom") +
   theme(
-    axis.text.x = element_text(angle = 60, hjust = 0, vjust = 0, size = 8),
-    plot.margin = unit(c(3.2, 1.2, 0.6, 0.6), "cm")
+    axis.text.x = element_text(angle = 55, hjust = 1, vjust = 1, size = 8.5),
+    plot.margin = unit(c(0.6, 0.8, 2.8, 0.5), "cm")
   )
 ```
 
