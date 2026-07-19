@@ -9,7 +9,7 @@ Rows with any missing outcome or predictor are dropped (3,111 complete counties)
 
 Source materials (teaching examples):
 
-- [Balderama — MLR in Stan](http://webpages.math.luc.edu/~ebalderama/bayes_resources/code/mlr_stan.html)
-- [Reich — Election data notes](https://www4.stat.ncsu.edu/~bjreich/BSMdata/Election.html)
+- Earvin Balderama’s former Loyola “MLR in Stan” notes (`webpages.math.luc.edu/~ebalderama/bayes_resources/code/mlr_stan.html`) — that page is no longer online; the Stan teaching pattern is reflected in `stan/mlr.stan`.
+- [Brian Reich — Election data notes](https://www4.stat.ncsu.edu/~bjreich/BSMdata/Election.html)
 
 `election_2008_2016.Rdata` is the original multi-object teaching dump kept for provenance; the notebook reads the CSV.

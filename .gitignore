@@ -11,3 +11,4 @@ predicting_credit_fraud/data/*.zip
 
 # Optional full Google Mobility dump (SWE/DEN extract ships in-repo)
 cdss_hackathon_2020/data/google_mobility.csv
+**/header_nocache.html

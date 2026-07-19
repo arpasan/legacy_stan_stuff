@@ -197,14 +197,17 @@ diag2 <- tibble(
 diag2
 
 beta_pars <- paste0("beta[", seq_len(stan_dat$k), "]")
+color_scheme_set("yellow")
 mcmc_intervals(post2, pars = beta_pars) +
   scale_y_discrete(labels = colnames(X_scaled))
 ```
 
 ```{r stan-fit-areas}
+color_scheme_set("yellow")
 mcmc_areas(post2, pars = c("beta[4]", "beta[7]")) +
-  labs(title = "Posterior densities (scaled predictors)") +
+  labs(title = "Posterior Distributions") +
   scale_y_discrete(labels = c("hispanic", "homeownership_rate"))
+color_scheme_set("blue")
 ```
 
 Slopes here are in **scaled-predictor units**, so magnitudes are not directly comparable to the `stan_glm` coefficients on the raw scale. The qualitative signs for Hispanic and homeownership still line up.

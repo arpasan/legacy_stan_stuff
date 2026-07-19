@@ -11,9 +11,7 @@ output:
     toc: yes
     toc_depth: 3
     toc_float: yes
-    includes:
-      in_header: header_nocache.html
-substitute: Capital One Data Science Challenge
+subtitle: Capital One Data Science Challenge
 ---
 
 ```{r setup, include=FALSE}
