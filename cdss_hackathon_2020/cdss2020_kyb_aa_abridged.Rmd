@@ -115,26 +115,40 @@ tibble(
 )
 ```
 
-Time series models are sensitive to missingness. On the raw **region-day** mobility extract, several series have gaps; after collapsing to **country-day** means and joining ECDC, the modeling panel is complete (so a `vis_miss` heatmap would just be a solid “present” block — useless). Compare the two grains:
+Time series models are sensitive to missingness. Compare percent missing by variable in the raw region-day mobility extract vs the country-day modeling panel (full names on the axis — not a `naniar` heatmap).
 
-```{r missingness}
-miss_region <- miss_var_summary(mobility_region) |>
-  filter(n_miss > 0) |>
-  arrange(desc(pct_miss))
+```{r missingness, fig.height=5.5, fig.width=8}
+miss_compare <- bind_rows(
+  miss_var_summary(mobility_region) |> mutate(grain = "region-day mobility"),
+  miss_var_summary(panel) |> mutate(grain = "country-day panel")
+) |>
+  mutate(
+    variable = factor(variable, levels = rev(sort(unique(variable)))),
+    grain = factor(grain, levels = c("region-day mobility", "country-day panel"))
+  )
 
-miss_panel <- miss_var_summary(panel) |>
-  arrange(desc(pct_miss))
+ggplot(miss_compare, aes(pct_miss, variable)) +
+  geom_col(fill = "#4a4a4a", width = 0.7) +
+  facet_wrap(~grain, nrow = 1) +
+  scale_x_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.08))) +
+  labs(
+    title = "Percent missing by variable",
+    x = "% missing",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    strip.text = element_text(face = "bold"),
+    plot.margin = margin(8, 16, 8, 8)
+  )
 
 knitr::kable(
-  miss_region,
+  miss_compare |>
+    select(grain, variable, n_miss, pct_miss) |>
+    arrange(grain, desc(pct_miss)),
   digits = 2,
-  caption = "Variables with any missingness in region-day mobility (before country-day collapse)"
-)
-
-knitr::kable(
-  miss_panel,
-  digits = 2,
-  caption = "Missingness in the country-day modeling panel (should be all zeros)"
+  caption = "Same missingness numbers in table form"
 )
 ```
 
