@@ -48,18 +48,20 @@ pre {
 
 # Load the data
 
-County-level change in GOP support (2012 → 2016) against ACS-style covariates. The teaching extract and citations are in `data/README.md`. This is an ecological regression used as a methods walkthrough, not a causal claim about individual vote choice.
+The data and some of the examples are derivatives of the sources noted in `data/README.md` (plus a couple more).
+
+What we've got as the dependent variable is the percentage change in GOP support from 2012 to 2016.
 
 ```{r load-data}
 d <- readr::read_csv("data/election_counties.csv", show_col_types = FALSE)
 glimpse(d)
 ```
 
-Predictors (all continuous): `pop_change`, `age_65_plus`, `black`, `hispanic`, `hs_grad`, `undergrad`, `homeownership_rate`, `median_home_value`, `median_income`, `poverty_rate`.
+The independent variables (all continuous): `pop_change`, `age_65_plus`, `black`, `hispanic`, `hs_grad`, `undergrad`, `homeownership_rate`, `median_home_value`, `median_income`, `poverty_rate`.
 
 # Frequentist `lm()`
 
-As a baseline we fit ordinary least squares. The point is comparison of workflows, not a polished election model.
+You could think about what model to use, but as an exemplar we are more interested in comparing notes than in the actual analysis. We'll therefore proceed to `lm()`.
 
 ```{r lm-freq}
 lm_freq <- lm(gop_support_change ~ ., data = d)
@@ -159,7 +161,7 @@ Age $65+$ and poverty rate pull toward positive GOP-support change in this perio
 pp_check(post1)
 ```
 
-The density overlay shows mild mismatch in the bulk (medians slightly off). That is expected for a plain linear Gaussian on ecological data; better priors or a richer mean function would be next steps in a substantive project.
+The density overlay shows mild mismatch in the bulk (medians slightly off), which could be remedied e.g. by changing our priors.
 
 ## Custom Stan (`rstan`)
 
@@ -259,7 +261,7 @@ names(a_s) <- names(medians)
 q_sigma <- c(lower = 0.25, median = 0.5, upper = 1)
 ```
 
-These quantile targets are deliberately tight and inspired by the `stan_glm` posterior; they are a teaching device for quantile elicitation, not a claim that such precise prior knowledge is available in practice.
+These quantile targets are deliberately tight and inspired by the `stan_glm` posterior from the preceding chunks.
 
 ```{r prior-r2}
 feat <- c("pop_change", "age_65_plus", "black", "hispanic", "hs_grad",
@@ -346,4 +348,4 @@ Three fits on the same county panel:
 2. **`stan_glm`** — default weakly informative priors, full posterior, LOO, PPC.
 3. **Custom Stan + `stan_lm($R^2$)`** — explicit Student-$t$ priors on a scaled design, then a quantile-elicited $R^2$ prior that folds GLD / J-QPD into `rstanarm`.
 
-Quantile elicitation is more work than naming a Gaussian, but it makes prior beliefs about IQR and tails explicit. For substantive work one would still check geometry (R-hat, ESS), predictive calibration, and whether an ecological linear mean is even the right estimand.
+It may not be quite trivial to "guess" the prior stuff using quantile functions. But the tradeoff is that we can dispense with pre-defined distributions — a cleverer approach, but more difficult to implement.
